@@ -2,6 +2,8 @@ import os
 import aiohttp
 import asyncio
 import logging
+import yt_dlp
+import re
 from typing import Optional, Tuple
 from pathlib import Path
 from config import CHUNK_SIZE, MAX_FILE_SIZE_MB, DOWNLOAD_TIMEOUT, DOWNLOADS_DIR
@@ -11,11 +13,43 @@ logger = logging.getLogger(__name__)
 class DownloadError(Exception):
     pass
 
+def is_youtube_url(url: str) -> bool:
+    youtube_regex = (
+        r'(https?://)?(www\.)?'
+        r'(youtube|youtu|youtube-nocookie)\.(com|be)/'
+        r'(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
+    )
+    return re.match(youtube_regex, url) is not None
+
+async def download_youtube(url: str, download_id: int) -> Tuple[str, int]:
+    ydl_opts = {
+        'format': 'best',
+        'outtmpl': str(DOWNLOADS_DIR / f"{download_id}_%(title)s.%(ext)s"),
+        'max_filesize': MAX_FILE_SIZE_MB * 1024 * 1024,
+        'quiet': True,
+        'no_warnings': True,
+    }
+
+    try:
+        loop = asyncio.get_event_loop()
+        # Run yt-dlp in a thread pool as it is blocking
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
+            file_path = ydl.prepare_filename(info)
+            file_size = os.path.getsize(file_path)
+            return file_path, file_size
+    except Exception as e:
+        logger.error(f"YouTube download error: {e}")
+        raise DownloadError(f"YouTube download failed: {str(e)}")
+
 async def download_file(url: str, download_id: int) -> Tuple[str, int]:
     """
-    Downloads a file from a URL using streaming.
+    Downloads a file from a URL using streaming or yt-dlp for YouTube.
     Returns (file_path, file_size).
     """
+    if is_youtube_url(url):
+        return await download_youtube(url, download_id)
+
     timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT)
     file_path: Optional[Path] = None
     try:
@@ -32,7 +66,6 @@ async def download_file(url: str, download_id: int) -> Tuple[str, int]:
                 filename = "file_" + str(download_id)
                 content_disposition = response.headers.get('Content-Disposition')
                 if content_disposition and 'filename=' in content_disposition:
-                    import re
                     match = re.findall('filename="?([^"]+)"?', content_disposition)
                     if match:
                         filename = match[0]

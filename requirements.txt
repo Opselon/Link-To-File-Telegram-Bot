@@ -4,3 +4,4 @@ python-dotenv>=1.0.0
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
 pytest-aiohttp>=1.0.0
+yt-dlp>=2023.0.0
