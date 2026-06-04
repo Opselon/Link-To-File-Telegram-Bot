@@ -67,6 +67,12 @@ def strip_ansi(text: str) -> str:
 
 def get_progress_bar(downloaded: int, total: int, speed: float, eta: float) -> str:
     """Generates a visual progress bar and stats."""
+    # Ensure values are not None
+    downloaded = downloaded or 0
+    total = total or 0
+    speed = speed or 0
+    eta = eta or 0
+
     if total > 0:
         percent = (downloaded / total) * 100
         filled_length = int(20 * downloaded // total)
