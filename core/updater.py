@@ -12,18 +12,41 @@ console = Console()
 logger = logging.getLogger(__name__)
 
 class Updater:
-    def __init__(self, repo_url="https://github.com/user/repo"): # Placeholder
+    def __init__(self, repo_url="https://github.com/Opselon/Link-To-File-Telegram-Bot"):
         self.repo_url = repo_url
         self.base_dir = Path(__file__).resolve().parent.parent
         self.backup_dir = self.base_dir / "backup"
 
     def check_for_updates(self) -> bool:
         """
-        In a real scenario, this would fetch the latest version from GitHub.
-        For this implementation, we simulate a version check.
+        Checks for updates by fetching the version file from GitHub.
         """
-        # Simulation: assume we are always up to date unless forced
-        return False
+        try:
+            import aiohttp
+            import asyncio
+
+            # Using raw.githubusercontent.com for easy fetching
+            raw_version_url = f"{self.repo_url.replace('github.com', 'raw.githubusercontent.com')}/main/core/version.py"
+
+            async def fetch_version():
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(raw_version_url) as response:
+                        if response.status == 200:
+                            content = await response.text()
+                            # Extract version from content: VERSION = "1.0.0"
+                            import re
+                            match = re.search(r'VERSION\s*=\s*"([^"]+)"', content)
+                            if match:
+                                return match.group(1)
+                return None
+
+            latest_version = asyncio.run(fetch_version())
+            if latest_version and latest_version != VERSION:
+                console.print(f"[bold cyan]A new version is available: {latest_version}[/bold cyan]")
+                return True
+            return False
+        except Exception:
+            return False
 
     def backup_config(self):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
