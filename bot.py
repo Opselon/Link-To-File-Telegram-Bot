@@ -1,7 +1,7 @@
 import logging
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from aiogram.filters.callback_data import CallbackData
 import os
 import asyncio
@@ -24,6 +24,18 @@ class YTCallback(CallbackData, prefix="yt"):
     action: str
     download_id: int
     quality: Optional[str] = None
+
+async def send_file(message: Message, file_path: str, caption: str):
+    """Sends a file as video, audio, or document based on its extension."""
+    ext = os.path.splitext(file_path)[1].lower()
+    document = FSInputFile(file_path)
+
+    if ext in ['.mp4', '.mkv', '.mov', '.avi']:
+        await message.answer_video(document, caption=caption)
+    elif ext in ['.mp3', '.m4a', '.wav', '.flac', '.ogg']:
+        await message.answer_audio(document, caption=caption)
+    else:
+        await message.answer_document(document, caption=caption)
 
 def get_yt_keyboard(download_id: int) -> InlineKeyboardMarkup:
     buttons = [
@@ -91,8 +103,7 @@ async def handle_url(message: types.Message):
         db.update_download_status(download_id, 'uploading', filename=os.path.basename(file_path), size=size)
         await status_msg.edit_text(f"📤 Uploading... ({format_size(size)})")
 
-        document = FSInputFile(file_path)
-        await message.answer_document(document, caption=f"✅ Done! {format_size(size)}")
+        await send_file(message, file_path, caption=f"✅ Done! {format_size(size)}")
 
         db.update_download_status(download_id, 'completed')
         await status_msg.delete()
@@ -160,8 +171,7 @@ async def process_yt_callback(callback: types.CallbackQuery, callback_data: YTCa
         db.update_download_status(download_id, 'uploading', filename=os.path.basename(file_path), size=size)
         await callback.message.edit_text(f"📤 Uploading... ({format_size(size)})")
 
-        document = FSInputFile(file_path)
-        await callback.message.answer_document(document, caption=f"✅ Done! {format_size(size)}")
+        await send_file(callback.message, file_path, caption=f"✅ Done! {format_size(size)}")
 
         db.update_download_status(download_id, 'completed')
         await callback.message.delete()

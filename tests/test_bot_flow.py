@@ -62,3 +62,36 @@ async def test_full_flow_success():
         assert mock_update_status.call_count >= 2
         mock_cleanup.assert_called()
         status_msg.delete.assert_called()
+
+@pytest.mark.asyncio
+async def test_send_file_video():
+    message = AsyncMock()
+    file_path = "downloads/video.mp4"
+    caption = "test caption"
+
+    with patch('bot.FSInputFile') as mock_fs_input:
+        from bot import send_file
+        await send_file(message, file_path, caption)
+        message.answer_video.assert_called_once_with(mock_fs_input.return_value, caption=caption)
+
+@pytest.mark.asyncio
+async def test_send_file_audio():
+    message = AsyncMock()
+    file_path = "downloads/audio.mp3"
+    caption = "test caption"
+
+    with patch('bot.FSInputFile') as mock_fs_input:
+        from bot import send_file
+        await send_file(message, file_path, caption)
+        message.answer_audio.assert_called_once_with(mock_fs_input.return_value, caption=caption)
+
+@pytest.mark.asyncio
+async def test_send_file_document():
+    message = AsyncMock()
+    file_path = "downloads/doc.pdf"
+    caption = "test caption"
+
+    with patch('bot.FSInputFile') as mock_fs_input:
+        from bot import send_file
+        await send_file(message, file_path, caption)
+        message.answer_document.assert_called_once_with(mock_fs_input.return_value, caption=caption)
