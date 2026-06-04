@@ -7,7 +7,8 @@ A production-ready but simple Telegram File Downloader Bot in Python.
 - **🚀 Modern CLI Wizard**: Interactive, beautiful terminal setup experience.
 - **⚡ Easy Updates**: One-command safe update system with automatic backups.
 - **Direct File Downloads**: Supports any direct link to files.
-- **YouTube Support**: Downloads videos from YouTube using `yt-dlp`.
+- **YouTube & Instagram Support**: Downloads videos from YouTube and Instagram (Reels, Posts, Stories) using `yt-dlp`.
+- **Custom Bot API Support**: Supports local Telegram Bot API servers for uploading files up to 2GB.
 - **Async & Streaming**: Uses `aiogram 3.x` and `aiohttp` with streaming (no high RAM usage).
 - **SQLite Database**: Keeps track of users and download history.
 - **Security**:

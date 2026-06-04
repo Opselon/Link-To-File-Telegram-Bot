@@ -3,21 +3,33 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from aiogram.filters.callback_data import CallbackData
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 import os
 import asyncio
 from typing import Optional
 
-from config import BOT_TOKEN, ADMIN_ID, MAX_FILE_SIZE_MB
+from config import BOT_TOKEN, ADMIN_ID, MAX_FILE_SIZE_MB, TELEGRAM_API_URL
 from db import db
 from utils import is_valid_url, is_safe_url, check_rate_limit, format_size
-from downloader import download_file, cleanup_file, DownloadError, is_youtube_url
+from downloader import download_file, cleanup_file, DownloadError, is_youtube_url, is_instagram_url
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Initialize session if custom API URL is provided
+session = None
+if TELEGRAM_API_URL:
+    session = AiohttpSession(
+        api=TelegramAPIServer.from_base(TELEGRAM_API_URL)
+    )
+
 # We initialize Bot and Dispatcher inside start_bot or provide a way to mock them
-bot = Bot(token=BOT_TOKEN if BOT_TOKEN else "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11")
+bot = Bot(
+    token=BOT_TOKEN if BOT_TOKEN else "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+    session=session
+)
 dp = Dispatcher()
 
 class YTCallback(CallbackData, prefix="yt"):
@@ -90,6 +102,41 @@ async def handle_url(message: types.Message):
     if is_youtube_url(url):
         download_id = db.add_download(user_id, url)
         await message.answer("📺 YouTube detected! Select format and quality:", reply_markup=get_yt_keyboard(download_id))
+        return
+
+    if is_instagram_url(url):
+        status_msg = await message.answer("📸 Instagram detected! ⏳ Downloading...")
+        download_id = db.add_download(user_id, url)
+        file_path = None
+        try:
+            file_path, size, title = await download_file(url, download_id)
+
+            db.update_download_status(download_id, 'uploading', filename=os.path.basename(file_path), size=size)
+            await status_msg.edit_text(f"📤 Uploading... ({format_size(size)})")
+
+            caption = f"📸 **{title}**\n\n✅ Done! {format_size(size)}"
+            await send_file(message, file_path, caption=caption)
+
+            db.update_download_status(download_id, 'completed')
+            await status_msg.delete()
+        except DownloadError as e:
+            logger.error(f"Download error for user {user_id}: {e}")
+            await status_msg.edit_text(f"❌ Error: {str(e)}")
+            db.update_download_status(download_id, 'failed')
+        except Exception as e:
+            if "Request Entity Too Large" in str(e) or "TelegramEntityTooLarge" in type(e).__name__:
+                await status_msg.edit_text(
+                    "❌ Error: File is too large for Telegram Bot API.\n\n"
+                    "Standard Bots are limited to 50MB for uploading. "
+                    "To send larger files (up to 2GB), you need to use a local Telegram Bot API server."
+                )
+            else:
+                logger.exception(f"Unexpected error for user {user_id}")
+                await status_msg.edit_text("❌ An unexpected error occurred.")
+            db.update_download_status(download_id, 'failed')
+        finally:
+            if file_path:
+                cleanup_file(file_path)
         return
 
     status_msg = await message.answer("🔍 Checking...")
