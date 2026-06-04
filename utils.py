@@ -9,6 +9,9 @@ from config import RATE_LIMIT_SECONDS
 # Simple in-memory rate limiting
 user_last_request: Dict[int, float] = {}
 
+# ANSI escape codes regex
+ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
 def is_valid_url(url: str) -> bool:
     try:
         result = urlparse(url)
@@ -57,3 +60,7 @@ def format_size(size_bytes: int) -> str:
     p = math.pow(1024, i)
     s = round(size_bytes / p, 2)
     return f"{s} {size_name[i]}"
+
+def strip_ansi(text: str) -> str:
+    """Removes ANSI escape codes from a string."""
+    return ANSI_ESCAPE.sub('', text)

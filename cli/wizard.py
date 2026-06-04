@@ -1,5 +1,6 @@
 import os
 import sys
+import shutil
 from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
@@ -18,8 +19,17 @@ This wizard will help you configure your bot in seconds.
     """
     console.print(Panel(welcome_text, expand=False, border_style="cyan"))
 
+def check_ffmpeg():
+    if not shutil.which("ffmpeg"):
+        rprint("[yellow]⚠️  Warning: FFmpeg was not found in your PATH.[/yellow]")
+        rprint("[yellow]YouTube downloads might fail. It is recommended to install FFmpeg.[/yellow]")
+        rprint("[dim]On Ubuntu: sudo apt install ffmpeg[/dim]\n")
+        return False
+    return True
+
 def run_wizard():
     show_welcome()
+    check_ffmpeg()
 
     # 1. Bot Token
     bot_token = Prompt.ask("[bold yellow]Enter your Telegram Bot Token[/bold yellow] (from @BotFather)")

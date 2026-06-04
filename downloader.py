@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 from pathlib import Path
 from urllib.parse import urlparse
 from config import CHUNK_SIZE, MAX_FILE_SIZE_MB, DOWNLOAD_TIMEOUT, DOWNLOADS_DIR
+from utils import strip_ansi
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +56,16 @@ async def download_youtube(url: str, download_id: int, options: Optional[dict] =
             file_size = os.path.getsize(file_path)
             return str(file_path), file_size
     except Exception as e:
-        logger.error(f"YouTube download error: {e}")
-        if "File is larger than max_filesize" in str(e):
-             raise DownloadError(f"File too large: exceeds {MAX_FILE_SIZE_MB}MB")
-        raise DownloadError(f"YouTube download failed: {str(e)}")
+        error_msg = strip_ansi(str(e))
+        logger.error(f"YouTube download error: {error_msg}")
+
+        if "File is larger than max_filesize" in error_msg:
+            raise DownloadError(f"File too large: exceeds {MAX_FILE_SIZE_MB}MB")
+
+        if "ffprobe and ffmpeg not found" in error_msg or "ffmpeg is not installed" in error_msg:
+            raise DownloadError("YouTube download failed: FFmpeg is not installed on the server. Please contact the administrator.")
+
+        raise DownloadError(f"YouTube download failed: {error_msg}")
 
 async def download_file(url: str, download_id: int, ytdlp_options: Optional[dict] = None) -> Tuple[str, int]:
     """

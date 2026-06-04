@@ -20,6 +20,7 @@ A production-ready but simple Telegram File Downloader Bot in Python.
 ## Tech Stack
 
 - Python 3.11+
+- [FFmpeg](https://ffmpeg.org/) (Required for YouTube downloads)
 - [aiogram 3.x](https://docs.aiogram.dev/)
 - [aiohttp](https://docs.aiohttp.org/)
 - [rich](https://github.com/Textualize/rich) (for modern CLI UX)
@@ -51,12 +52,18 @@ tests/             # Test suite
    cd Link-To-File-Telegram-Bot
    ```
 
-2. **Install dependencies**:
+2. **Install System Dependencies**:
+   On Ubuntu/Debian:
+   ```bash
+   sudo apt update && sudo apt install ffmpeg -y
+   ```
+
+3. **Install Python dependencies**:
    ```bash
    pip install -r requirements.txt
    ```
 
-3. **Launch the Easy Setup Wizard**:
+4. **Launch the Easy Setup Wizard**:
    The first time you run the bot, it will automatically launch the interactive wizard to configure everything for you.
    ```bash
    python main.py
