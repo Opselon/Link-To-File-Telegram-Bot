@@ -12,8 +12,8 @@ except ValueError:
     ADMIN_ID = None
 
 # Downloader Configuration
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", 100))
-DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", 300))  # 5 minutes
+MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", 2000))
+DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", 600))  # 10 minutes
 CHUNK_SIZE = 1024 * 1024  # 1MB chunks
 
 # Storage
