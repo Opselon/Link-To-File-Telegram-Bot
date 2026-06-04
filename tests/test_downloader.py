@@ -17,7 +17,7 @@ async def mock_server(aiohttp_server):
 @pytest.mark.asyncio
 async def test_successful_download(mock_server):
     url = f"http://{mock_server.host}:{mock_server.port}/testfile"
-    file_path, size = await download_file(url, 999)
+    file_path, size, title = await download_file(url, 999)
 
     assert os.path.exists(file_path)
     assert size > 0

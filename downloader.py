@@ -23,7 +23,7 @@ def is_youtube_url(url: str) -> bool:
     )
     return re.match(youtube_regex, url) is not None
 
-async def download_youtube(url: str, download_id: int, options: Optional[dict] = None) -> Tuple[str, int]:
+async def download_youtube(url: str, download_id: int, options: Optional[dict] = None) -> Tuple[str, int, str]:
     ydl_opts = {
         'format': 'best',
         'outtmpl': str(DOWNLOADS_DIR / f"{download_id}_%(title)s.%(ext)s"),
@@ -43,6 +43,7 @@ async def download_youtube(url: str, download_id: int, options: Optional[dict] =
                 info = info['entries'][0]
 
             file_path = ydl.prepare_filename(info)
+            title = info.get('title', 'Video')
             # yt-dlp might change extension if it post-processes (e.g. to mp3)
             if not os.path.exists(file_path):
                 # Search for files starting with download_id
@@ -54,7 +55,7 @@ async def download_youtube(url: str, download_id: int, options: Optional[dict] =
                     raise DownloadError("Could not find downloaded file.")
 
             file_size = os.path.getsize(file_path)
-            return str(file_path), file_size
+            return str(file_path), file_size, title
     except Exception as e:
         error_msg = strip_ansi(str(e))
         logger.error(f"YouTube download error: {error_msg}")
@@ -67,7 +68,7 @@ async def download_youtube(url: str, download_id: int, options: Optional[dict] =
 
         raise DownloadError(f"YouTube download failed: {error_msg}")
 
-async def download_file(url: str, download_id: int, ytdlp_options: Optional[dict] = None) -> Tuple[str, int]:
+async def download_file(url: str, download_id: int, ytdlp_options: Optional[dict] = None) -> Tuple[str, int, str]:
     """
     Downloads a file from a URL using streaming or yt-dlp for YouTube.
     Returns (file_path, file_size).
@@ -95,17 +96,20 @@ async def download_file(url: str, download_id: int, ytdlp_options: Optional[dict
 
                     # Determine filename
                     filename = "file_" + str(download_id)
+                    title = "File"
                     content_disposition = response.headers.get('Content-Disposition')
                     if content_disposition and 'filename=' in content_disposition:
                         match = re.findall('filename="?([^"]+)"?', content_disposition)
                         if match:
                             filename = match[0]
+                            title = filename
                     else:
                         # Try to get from URL
                         parsed_url = Path(urlparse(url).path)
                         path_name = parsed_url.name
                         if path_name and '.' in path_name:
                             filename = path_name
+                            title = path_name
 
                     file_path = DOWNLOADS_DIR / f"{download_id}_{filename}"
                     downloaded_size = 0
@@ -117,7 +121,7 @@ async def download_file(url: str, download_id: int, ytdlp_options: Optional[dict
                                 raise DownloadError(f"File exceeded maximum size during download.")
                             f.write(chunk)
 
-                    return str(file_path), downloaded_size
+                    return str(file_path), downloaded_size, title
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             if attempt < max_retries - 1:
                 logger.warning(f"Download attempt {attempt+1} failed: {e}. Retrying...")
