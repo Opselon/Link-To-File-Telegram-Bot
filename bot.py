@@ -14,6 +14,7 @@ from config import BOT_TOKEN, ADMIN_ID, MAX_FILE_SIZE_MB, TELEGRAM_API_URL
 from db import db
 from utils import is_valid_url, is_safe_url, check_rate_limit, format_size, get_progress_bar
 from downloader import download_file, cleanup_file, DownloadError, is_youtube_url, is_instagram_url
+from queue_manager import download_queue
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -134,6 +135,62 @@ async def cmd_help(message: types.Message):
         parse_mode="HTML"
     )
 
+async def execute_download(message: Message, status_msg: Message, url: str, download_id: int, prefix: str, ytdlp_options: Optional[dict] = None):
+    """Core logic to download, upload and cleanup a file. Runs inside the queue."""
+    file_path = None
+    user_id = message.from_user.id
+    progress_updater = ProgressUpdater(status_msg, prefix)
+
+    try:
+        await status_msg.edit_text(f"{prefix}\n⏳ <b>Starting...</b>", parse_mode="HTML")
+        file_path, size, title = await download_file(url, download_id, ytdlp_options, progress_callback=progress_updater)
+
+        db.update_download_status(download_id, 'uploading', filename=os.path.basename(file_path), size=size)
+        await status_msg.edit_text(f"{prefix}\n📤 <b>Uploading...</b> ({format_size(size)})", parse_mode="HTML")
+
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in ['.mp3', '.m4a', '.wav', '.flac', '.ogg']:
+            caption = f"🎵 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
+        elif ext in ['.mp4', '.mkv', '.mov', '.avi']:
+            caption = f"🎬 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
+        else:
+            caption = f"📄 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
+
+        await send_file(message, file_path, caption=caption)
+
+        db.update_download_status(download_id, 'completed')
+        try:
+            await status_msg.delete()
+        except:
+            pass
+
+    except DownloadError as e:
+        logger.error(f"Download error for user {user_id}: {e}")
+        try:
+            await status_msg.edit_text(f"❌ Error: {str(e)}")
+        except:
+            await message.answer(f"❌ Error: {str(e)}")
+        db.update_download_status(download_id, 'failed')
+    except Exception as e:
+        if "Request Entity Too Large" in str(e) or "TelegramEntityTooLarge" in type(e).__name__:
+             error_text = (
+                 "❌ Error: File is too large for Telegram Bot API.\n\n"
+                 "Standard Bots are limited to 50MB for uploading. "
+                 "To send larger files (up to 2GB), you need to use a local Telegram Bot API server."
+             )
+        else:
+            logger.exception(f"Unexpected error for user {user_id}")
+            error_text = "❌ An unexpected error occurred."
+
+        try:
+            await status_msg.edit_text(error_text)
+        except:
+            await message.answer(error_text)
+        db.update_download_status(download_id, 'failed')
+    finally:
+        if file_path:
+            cleanup_file(file_path)
+
 @dp.message(F.text)
 async def handle_url(message: types.Message):
     url = message.text.strip()
@@ -156,84 +213,28 @@ async def handle_url(message: types.Message):
         return
 
     if is_instagram_url(url):
-        status_msg = await message.answer("📸 <b>Instagram Link Detected!</b>\n⏳ <i>Preparing download...</i>", parse_mode="HTML")
         download_id = db.add_download(user_id, url)
-        file_path = None
-        progress_updater = ProgressUpdater(status_msg, "📸 <b>Instagram Download in Progress</b>")
-        try:
-            file_path, size, title = await download_file(url, download_id, progress_callback=progress_updater)
-
-            db.update_download_status(download_id, 'uploading', filename=os.path.basename(file_path), size=size)
-            await status_msg.edit_text(f"📤 Uploading... ({format_size(size)})")
-
-            caption = f"📸 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
-            await send_file(message, file_path, caption=caption)
-
-            db.update_download_status(download_id, 'completed')
-            await status_msg.delete()
-        except DownloadError as e:
-            logger.error(f"Download error for user {user_id}: {e}")
-            await status_msg.edit_text(f"❌ Error: {str(e)}")
-            db.update_download_status(download_id, 'failed')
-        except Exception as e:
-            if "Request Entity Too Large" in str(e) or "TelegramEntityTooLarge" in type(e).__name__:
-                await status_msg.edit_text(
-                    "❌ Error: File is too large for Telegram Bot API.\n\n"
-                    "Standard Bots are limited to 50MB for uploading. "
-                    "To send larger files (up to 2GB), you need to use a local Telegram Bot API server."
-                )
-            else:
-                logger.exception(f"Unexpected error for user {user_id}")
-                await status_msg.edit_text("❌ An unexpected error occurred.")
-            db.update_download_status(download_id, 'failed')
-        finally:
-            if file_path:
-                cleanup_file(file_path)
+        status_msg = await message.answer("📸 <b>Instagram Link Detected!</b>\n⏳ <i>Added to queue...</i>", parse_mode="HTML")
+        await download_queue.add_task(
+            execute_download,
+            message,
+            status_msg,
+            url,
+            download_id,
+            "📸 <b>Instagram Download</b>"
+        )
         return
 
-    status_msg = await message.answer("🔍 <b>Checking URL...</b>", parse_mode="HTML")
     download_id = db.add_download(user_id, url)
-    file_path = None
-
-    try:
-        await status_msg.edit_text("⏳ <b>Downloading...</b>", parse_mode="HTML")
-        progress_updater = ProgressUpdater(status_msg, "⏳ <b>Downloading File</b>")
-        file_path, size, title = await download_file(url, download_id, progress_callback=progress_updater)
-
-        db.update_download_status(download_id, 'uploading', filename=os.path.basename(file_path), size=size)
-        await status_msg.edit_text(f"📤 Uploading... ({format_size(size)})")
-
-        ext = os.path.splitext(file_path)[1].lower()
-        if ext in ['.mp3', '.m4a', '.wav', '.flac', '.ogg']:
-            caption = f"🎵 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
-        elif ext in ['.mp4', '.mkv', '.mov', '.avi']:
-            caption = f"🎬 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
-        else:
-            caption = f"📄 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
-
-        await send_file(message, file_path, caption=caption)
-
-        db.update_download_status(download_id, 'completed')
-        await status_msg.delete()
-
-    except DownloadError as e:
-        logger.error(f"Download error for user {user_id}: {e}")
-        await status_msg.edit_text(f"❌ Error: {str(e)}")
-        db.update_download_status(download_id, 'failed')
-    except Exception as e:
-        if "Request Entity Too Large" in str(e) or "TelegramEntityTooLarge" in type(e).__name__:
-             await status_msg.edit_text(
-                 "❌ Error: File is too large for Telegram Bot API.\n\n"
-                 "Standard Bots are limited to 50MB for uploading. "
-                 "To send larger files (up to 2GB), you need to use a local Telegram Bot API server."
-             )
-        else:
-            logger.exception(f"Unexpected error for user {user_id}")
-            await status_msg.edit_text("❌ An unexpected error occurred.")
-        db.update_download_status(download_id, 'failed')
-    finally:
-        if file_path:
-            cleanup_file(file_path)
+    status_msg = await message.answer("🔍 <b>Link Detected!</b>\n⏳ <i>Added to queue...</i>", parse_mode="HTML")
+    await download_queue.add_task(
+        execute_download,
+        message,
+        status_msg,
+        url,
+        download_id,
+        "⏳ <b>File Download</b>"
+    )
 
 @dp.callback_query(YTCallback.filter())
 async def process_yt_callback(callback: types.CallbackQuery, callback_data: YTCallback):
@@ -262,7 +263,7 @@ async def process_yt_callback(callback: types.CallbackQuery, callback_data: YTCa
                 'preferredquality': quality if quality else '192',
             }],
         }
-        await callback.message.edit_text(f"🎵 <b>Downloading Audio</b> (MP3 - {quality}kbps)...", parse_mode="HTML")
+        prefix = f"🎵 <b>Audio Download</b> (MP3 - {quality}kbps)"
     else:
         if quality == "best":
             f_str = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
@@ -270,49 +271,25 @@ async def process_yt_callback(callback: types.CallbackQuery, callback_data: YTCa
             f_str = f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<={quality}][ext=mp4]/best"
 
         ytdlp_options = {'format': f_str}
-        await callback.message.edit_text(f"🎬 <b>Downloading Video</b> (MP4 - {quality}p)...", parse_mode="HTML")
+        prefix = f"🎬 <b>Video Download</b> (MP4 - {quality}p)"
 
-    file_path = None
-    prefix = f"🎵 <b>Downloading Audio</b> ({quality}kbps)" if callback_data.action == "mp3" else f"🎬 <b>Downloading Video</b> ({quality}p)"
-    progress_updater = ProgressUpdater(callback.message, prefix)
-    try:
-        file_path, size, title = await download_file(url, download_id, ytdlp_options, progress_callback=progress_updater)
+    await callback.message.edit_text(f"{prefix}\n⏳ <i>Added to queue...</i>", parse_mode="HTML")
 
-        db.update_download_status(download_id, 'uploading', filename=os.path.basename(file_path), size=size)
-        await callback.message.edit_text(f"📤 Uploading... ({format_size(size)})")
-
-        ext = os.path.splitext(file_path)[1].lower()
-        if ext in ['.mp3', '.m4a', '.wav', '.flac', '.ogg']:
-            caption = f"🎵 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
-        elif ext in ['.mp4', '.mkv', '.mov', '.avi']:
-            caption = f"🎬 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
-        else:
-            caption = f"📄 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
-
-        await send_file(callback.message, file_path, caption=caption)
-
-        db.update_download_status(download_id, 'completed')
-        await callback.message.delete()
-
-    except DownloadError as e:
-        logger.error(f"Download error for user {user_id}: {e}")
-        await callback.message.edit_text(f"❌ Error: {str(e)}")
-        db.update_download_status(download_id, 'failed')
-    except Exception as e:
-        if "Request Entity Too Large" in str(e) or "TelegramEntityTooLarge" in type(e).__name__:
-             await callback.message.edit_text(
-                 "❌ Error: File is too large for Telegram Bot API.\n\n"
-                 "Standard Bots are limited to 50MB for uploading. "
-                 "To send larger files (up to 2GB), you need to use a local Telegram Bot API server."
-             )
-        else:
-            logger.exception(f"Unexpected error for user {user_id}")
-            await callback.message.edit_text("❌ An unexpected error occurred.")
-        db.update_download_status(download_id, 'failed')
-    finally:
-        if file_path:
-            cleanup_file(file_path)
+    await download_queue.add_task(
+        execute_download,
+        callback.message,
+        callback.message,
+        url,
+        download_id,
+        prefix,
+        ytdlp_options
+    )
+    await callback.answer("Added to download queue!")
 
 async def start_bot():
     logger.info("Bot started...")
-    await dp.start_polling(bot)
+    download_queue.start()
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await download_queue.stop()

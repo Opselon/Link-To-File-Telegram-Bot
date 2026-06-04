@@ -15,6 +15,7 @@ except ValueError:
 # Downloader Configuration
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", 2000))
 DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", 600))  # 10 minutes
+QUEUE_TASK_TIMEOUT = int(os.getenv("QUEUE_TASK_TIMEOUT", 1800))  # 30 minutes
 CHUNK_SIZE = 1024 * 1024  # 1MB chunks
 
 # Storage
