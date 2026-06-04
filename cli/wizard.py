@@ -47,8 +47,10 @@ def run_wizard():
     advanced = Prompt.ask("[bold blue]Configure advanced settings?[/bold blue]", choices=["y", "n"], default="n")
 
     timeout = 300
+    telegram_api_url = ""
     if advanced == "y":
         timeout = IntPrompt.ask("Download Timeout (seconds)", default=300)
+        telegram_api_url = Prompt.ask("Custom Telegram Bot API URL (leave empty for default)", default="")
 
     # 5. Saving Config
     with Progress(
@@ -65,6 +67,9 @@ ADMIN_ID={admin_id}
 # Downloader Configuration
 MAX_FILE_SIZE_MB={max_size}
 DOWNLOAD_TIMEOUT={timeout}
+
+# Optional: Custom Telegram Bot API (for files up to 2GB)
+TELEGRAM_API_URL={telegram_api_url}
 """
         with open(".env", "w") as f:
             f.write(env_content)

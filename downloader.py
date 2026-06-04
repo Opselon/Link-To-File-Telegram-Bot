@@ -23,7 +23,13 @@ def is_youtube_url(url: str) -> bool:
     )
     return re.match(youtube_regex, url) is not None
 
-async def download_youtube(url: str, download_id: int, options: Optional[dict] = None) -> Tuple[str, int, str]:
+def is_instagram_url(url: str) -> bool:
+    instagram_regex = (
+        r'(https?://)?(www\.)?instagram\.com/(p|reels|reel|stories|tv|s)/[^/?#&]+'
+    )
+    return re.match(instagram_regex, url) is not None
+
+async def download_with_ytdlp(url: str, download_id: int, options: Optional[dict] = None) -> Tuple[str, int, str]:
     ydl_opts = {
         'format': 'best',
         'outtmpl': str(DOWNLOADS_DIR / f"{download_id}_%(title)s.%(ext)s"),
@@ -58,23 +64,23 @@ async def download_youtube(url: str, download_id: int, options: Optional[dict] =
             return str(file_path), file_size, title
     except Exception as e:
         error_msg = strip_ansi(str(e))
-        logger.error(f"YouTube download error: {error_msg}")
+        logger.error(f"Media download error: {error_msg}")
 
         if "File is larger than max_filesize" in error_msg:
             raise DownloadError(f"File too large: exceeds {MAX_FILE_SIZE_MB}MB")
 
         if "ffprobe and ffmpeg not found" in error_msg or "ffmpeg is not installed" in error_msg:
-            raise DownloadError("YouTube download failed: FFmpeg is not installed on the server. Please contact the administrator.")
+            raise DownloadError("Download failed: FFmpeg is not installed on the server. Please contact the administrator.")
 
-        raise DownloadError(f"YouTube download failed: {error_msg}")
+        raise DownloadError(f"Download failed: {error_msg}")
 
 async def download_file(url: str, download_id: int, ytdlp_options: Optional[dict] = None) -> Tuple[str, int, str]:
     """
-    Downloads a file from a URL using streaming or yt-dlp for YouTube.
-    Returns (file_path, file_size).
+    Downloads a file from a URL using streaming or yt-dlp for YouTube/Instagram.
+    Returns (file_path, file_size, title).
     """
-    if is_youtube_url(url):
-        return await download_youtube(url, download_id, ytdlp_options)
+    if is_youtube_url(url) or is_instagram_url(url):
+        return await download_with_ytdlp(url, download_id, ytdlp_options)
 
     timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT)
     file_path: Optional[Path] = None

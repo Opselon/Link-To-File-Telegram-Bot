@@ -6,6 +6,7 @@ load_dotenv(override=True)
 
 # Bot Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+TELEGRAM_API_URL = os.getenv("TELEGRAM_API_URL", None)
 try:
     ADMIN_ID = int(os.getenv("ADMIN_ID", 0)) if os.getenv("ADMIN_ID") else None
 except ValueError:

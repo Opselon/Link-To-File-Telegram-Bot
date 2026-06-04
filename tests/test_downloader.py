@@ -1,7 +1,7 @@
 import pytest
 import aiohttp
 from aiohttp import web
-from downloader import download_file, cleanup_file, DownloadError, is_youtube_url
+from downloader import download_file, cleanup_file, DownloadError, is_youtube_url, is_instagram_url
 from config import DOWNLOADS_DIR
 import os
 
@@ -38,6 +38,13 @@ def test_is_youtube_url():
     assert is_youtube_url("https://youtu.be/dQw4w9WgXcQ")
     assert is_youtube_url("https://www.youtube.com/embed/dQw4w9WgXcQ")
     assert not is_youtube_url("https://example.com/file.mp4")
+
+def test_is_instagram_url():
+    assert is_instagram_url("https://www.instagram.com/p/C_abc123/")
+    assert is_instagram_url("https://www.instagram.com/reels/C_abc123/")
+    assert is_instagram_url("https://www.instagram.com/reel/C_abc123/")
+    assert is_instagram_url("https://www.instagram.com/stories/username/123456789/")
+    assert not is_instagram_url("https://example.com/file.mp4")
 
 @pytest.mark.asyncio
 async def test_timeout_download():
