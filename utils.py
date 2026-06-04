@@ -64,3 +64,36 @@ def format_size(size_bytes: int) -> str:
 def strip_ansi(text: str) -> str:
     """Removes ANSI escape codes from a string."""
     return ANSI_ESCAPE.sub('', text)
+
+def get_progress_bar(downloaded: int, total: int, speed: float, eta: float) -> str:
+    """Generates a visual progress bar and stats."""
+    if total > 0:
+        percent = (downloaded / total) * 100
+        filled_length = int(20 * downloaded // total)
+        bar = '█' * filled_length + '░' * (20 - filled_length)
+    else:
+        percent = 0
+        bar = '░' * 20
+
+    # Format speed
+    speed_str = format_size(int(speed)) + "/s" if speed > 0 else "0 B/s"
+
+    # Format ETA
+    if eta > 0:
+        minutes, seconds = divmod(int(eta), 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours > 0:
+            eta_str = f"{hours}h {minutes}m {seconds}s"
+        elif minutes > 0:
+            eta_str = f"{minutes}m {seconds}s"
+        else:
+            eta_str = f"{seconds}s"
+    else:
+        eta_str = "Calculating..."
+
+    return (
+        f"<code>[{bar}]</code> {percent:.1f}%\n\n"
+        f"<b>Downloaded:</b> {format_size(downloaded)} / {format_size(total) if total > 0 else 'Unknown'}\n"
+        f"<b>Speed:</b> {speed_str}\n"
+        f"<b>ETA:</b> {eta_str}"
+    )

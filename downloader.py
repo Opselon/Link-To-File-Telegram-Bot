@@ -4,7 +4,7 @@ import asyncio
 import logging
 import yt_dlp
 import re
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Callable, Any
 from pathlib import Path
 from urllib.parse import urlparse
 from config import CHUNK_SIZE, MAX_FILE_SIZE_MB, DOWNLOAD_TIMEOUT, DOWNLOADS_DIR
@@ -24,21 +24,44 @@ def is_youtube_url(url: str) -> bool:
     return re.match(youtube_regex, url) is not None
 
 def is_instagram_url(url: str) -> bool:
+    """Checks if the URL is an Instagram URL."""
     instagram_regex = (
-        r'(https?://)?(www\.)?instagram\.com/(p|reels|reel|stories|tv|s)/[^/?#&]+'
+        r'(https?://)?(www\.)?(instagram\.com|instagr\.am|ig\.me)/(p|reels|reel|stories|tv|s|sh)/[^/?#&]+'
     )
     return re.match(instagram_regex, url) is not None
 
-async def download_with_ytdlp(url: str, download_id: int, options: Optional[dict] = None) -> Tuple[str, int, str]:
+async def download_with_ytdlp(url: str, download_id: int, options: Optional[dict] = None, progress_callback: Optional[Callable] = None) -> Tuple[str, int, str]:
     ydl_opts = {
         'format': 'best',
         'outtmpl': str(DOWNLOADS_DIR / f"{download_id}_%(title)s.%(ext)s"),
         'max_filesize': MAX_FILE_SIZE_MB * 1024 * 1024,
         'quiet': True,
         'no_warnings': True,
+        'nocheckcertificate': True,
+        'no_color': True,
+        'ignoreerrors': False,
+        'logtostderr': False,
+        'concurrent_fragment_downloads': 10,
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Referer': 'https://www.google.com/',
+        }
     }
     if options:
         ydl_opts.update(options)
+
+    if progress_callback:
+        def ytdlp_hook(d):
+            if d['status'] == 'downloading':
+                progress_callback(
+                    d.get('downloaded_bytes', 0),
+                    d.get('total_bytes') or d.get('total_bytes_estimate', 0),
+                    d.get('speed', 0),
+                    d.get('eta', 0)
+                )
+        ydl_opts['progress_hooks'] = [ytdlp_hook]
 
     try:
         loop = asyncio.get_event_loop()
@@ -74,13 +97,13 @@ async def download_with_ytdlp(url: str, download_id: int, options: Optional[dict
 
         raise DownloadError(f"Download failed: {error_msg}")
 
-async def download_file(url: str, download_id: int, ytdlp_options: Optional[dict] = None) -> Tuple[str, int, str]:
+async def download_file(url: str, download_id: int, ytdlp_options: Optional[dict] = None, progress_callback: Optional[Callable] = None) -> Tuple[str, int, str]:
     """
     Downloads a file from a URL using streaming or yt-dlp for YouTube/Instagram.
     Returns (file_path, file_size, title).
     """
     if is_youtube_url(url) or is_instagram_url(url):
-        return await download_with_ytdlp(url, download_id, ytdlp_options)
+        return await download_with_ytdlp(url, download_id, ytdlp_options, progress_callback)
 
     timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT)
     file_path: Optional[Path] = None
@@ -120,12 +143,22 @@ async def download_file(url: str, download_id: int, ytdlp_options: Optional[dict
                     file_path = DOWNLOADS_DIR / f"{download_id}_{filename}"
                     downloaded_size = 0
 
+                    total_size = int(content_length) if content_length else 0
+                    start_time = asyncio.get_event_loop().time()
+
                     with open(file_path, 'wb') as f:
                         async for chunk in response.content.iter_chunked(CHUNK_SIZE):
                             downloaded_size += len(chunk)
                             if downloaded_size > MAX_FILE_SIZE_MB * 1024 * 1024:
                                 raise DownloadError(f"File exceeded maximum size during download.")
                             f.write(chunk)
+
+                            if progress_callback:
+                                current_time = asyncio.get_event_loop().time()
+                                elapsed = current_time - start_time
+                                speed = downloaded_size / elapsed if elapsed > 0 else 0
+                                eta = (total_size - downloaded_size) / speed if speed > 0 and total_size > 0 else 0
+                                progress_callback(downloaded_size, total_size, speed, eta)
 
                     return str(file_path), downloaded_size, title
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:

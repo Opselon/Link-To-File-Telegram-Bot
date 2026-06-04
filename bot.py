@@ -1,5 +1,5 @@
 import logging
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types, F, html
 from aiogram.filters import Command
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from aiogram.filters.callback_data import CallbackData
@@ -7,11 +7,12 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 import os
 import asyncio
+import time
 from typing import Optional
 
 from config import BOT_TOKEN, ADMIN_ID, MAX_FILE_SIZE_MB, TELEGRAM_API_URL
 from db import db
-from utils import is_valid_url, is_safe_url, check_rate_limit, format_size
+from utils import is_valid_url, is_safe_url, check_rate_limit, format_size, get_progress_bar
 from downloader import download_file, cleanup_file, DownloadError, is_youtube_url, is_instagram_url
 
 # Configure logging
@@ -37,24 +38,54 @@ class YTCallback(CallbackData, prefix="yt"):
     download_id: int
     quality: Optional[str] = None
 
-async def send_file(message: Message, file_path: str, caption: str):
+class ProgressUpdater:
+    def __init__(self, message: Message, prefix: str):
+        self.message = message
+        self.prefix = prefix
+        self.last_update = 0
+        self.update_interval = 2.0  # Update every 2 seconds to avoid rate limits
+        try:
+            self.loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.loop = asyncio.get_event_loop()
+
+    def __call__(self, downloaded: int, total: int, speed: float, eta: float):
+        current_time = time.time()
+        if current_time - self.last_update < self.update_interval:
+            return
+
+        self.last_update = current_time
+        progress_text = get_progress_bar(downloaded, total, speed, eta)
+        full_text = f"{self.prefix}\n\n{progress_text}"
+
+        # Use run_coroutine_threadsafe for thread safety (yt-dlp runs in a thread)
+        asyncio.run_coroutine_threadsafe(self.safe_edit(full_text), self.loop)
+
+    async def safe_edit(self, text: str):
+        try:
+            await self.message.edit_text(text, parse_mode="HTML")
+        except Exception:
+            # Ignore errors like "message is not modified" or rate limits
+            pass
+
+async def send_file(message: Message, file_path: str, caption: str, parse_mode: str = "HTML"):
     """Sends a file as video, audio, or document based on its extension."""
     ext = os.path.splitext(file_path)[1].lower()
     document = FSInputFile(file_path)
 
     if ext in ['.mp4', '.mkv', '.mov', '.avi']:
-        await message.answer_video(document, caption=caption, parse_mode="Markdown")
+        await message.answer_video(document, caption=caption, parse_mode=parse_mode)
     elif ext in ['.mp3', '.m4a', '.wav', '.flac', '.ogg']:
-        await message.answer_audio(document, caption=caption, parse_mode="Markdown")
+        await message.answer_audio(document, caption=caption, parse_mode=parse_mode)
     else:
-        await message.answer_document(document, caption=caption, parse_mode="Markdown")
+        await message.answer_document(document, caption=caption, parse_mode=parse_mode)
 
 def get_yt_keyboard(download_id: int) -> InlineKeyboardMarkup:
     buttons = [
         [
-            InlineKeyboardButton(text="🎬 4K", callback_data=YTCallback(action="mp4", download_id=download_id, quality="2160").pack()),
-            InlineKeyboardButton(text="🎬 2K", callback_data=YTCallback(action="mp4", download_id=download_id, quality="1440").pack()),
-            InlineKeyboardButton(text="🎬 1080p", callback_data=YTCallback(action="mp4", download_id=download_id, quality="1080").pack()),
+            InlineKeyboardButton(text="🎬 4K", callback_data=YTCallback(action="mp4", download_id=download_id, quality="2160").pack(), style="primary"),
+            InlineKeyboardButton(text="🎬 2K", callback_data=YTCallback(action="mp4", download_id=download_id, quality="1440").pack(), style="primary"),
+            InlineKeyboardButton(text="🎬 1080p", callback_data=YTCallback(action="mp4", download_id=download_id, quality="1080").pack(), style="primary"),
         ],
         [
             InlineKeyboardButton(text="🎬 720p", callback_data=YTCallback(action="mp4", download_id=download_id, quality="720").pack()),
@@ -64,10 +95,10 @@ def get_yt_keyboard(download_id: int) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text="🎬 240p", callback_data=YTCallback(action="mp4", download_id=download_id, quality="240").pack()),
             InlineKeyboardButton(text="🎬 144p", callback_data=YTCallback(action="mp4", download_id=download_id, quality="144").pack()),
-            InlineKeyboardButton(text="🎬 Best", callback_data=YTCallback(action="mp4", download_id=download_id, quality="best").pack()),
+            InlineKeyboardButton(text="🎬 Best", callback_data=YTCallback(action="mp4", download_id=download_id, quality="best").pack(), style="success"),
         ],
         [
-            InlineKeyboardButton(text="🎵 320kbps", callback_data=YTCallback(action="mp3", download_id=download_id, quality="320").pack()),
+            InlineKeyboardButton(text="🎵 320kbps", callback_data=YTCallback(action="mp3", download_id=download_id, quality="320").pack(), style="primary"),
             InlineKeyboardButton(text="🎵 192kbps", callback_data=YTCallback(action="mp3", download_id=download_id, quality="192").pack()),
             InlineKeyboardButton(text="🎵 128kbps", callback_data=YTCallback(action="mp3", download_id=download_id, quality="128").pack()),
         ]
@@ -78,9 +109,29 @@ def get_yt_keyboard(download_id: int) -> InlineKeyboardMarkup:
 async def cmd_start(message: types.Message):
     db.add_user(message.from_user.id)
     await message.answer(
-        "👋 Hello! I'm a File Downloader Bot.\n\n"
-        "Send me a URL and I'll download it and send it back to you as a file.\n"
-        f"Maximum file size: {MAX_FILE_SIZE_MB}MB."
+        "👋 <b>Hello! I'm a File Downloader Bot.</b>\n\n"
+        "Send me any URL and I'll download it and send it back to you as a file.\n\n"
+        "📺 <b>YouTube & Instagram:</b> Just paste the link!\n"
+        "🌐 <b>Other Links:</b> Direct file links work best.\n\n"
+        f"🚀 <b>Max file size:</b> {MAX_FILE_SIZE_MB}MB.\n"
+        "💰 <b>Cost:</b> Completely Free for everyone!\n\n"
+        "Use /help to see more options.",
+        parse_mode="HTML"
+    )
+
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    await message.answer(
+        "📖 <b>How to use the Bot:</b>\n\n"
+        "1. <b>Paste a Link:</b> Send any direct link to a file, or a YouTube/Instagram link.\n"
+        "2. <b>Wait for Download:</b> I will show you the progress in real-time.\n"
+        "3. <b>Receive File:</b> Once finished, I will send the file directly to you.\n\n"
+        "🛠 <b>For Developers:</b>\n"
+        "• This bot is open-source.\n"
+        "• Supports custom Telegram Bot API servers for larger files (up to 2GB).\n"
+        "• built with aiogram 3.x and yt-dlp.\n\n"
+        "✅ <b>Free & Unlimited:</b> Enjoy fast parallel downloads!",
+        parse_mode="HTML"
     )
 
 @dp.message(F.text)
@@ -105,16 +156,17 @@ async def handle_url(message: types.Message):
         return
 
     if is_instagram_url(url):
-        status_msg = await message.answer("📸 Instagram detected! ⏳ Downloading...")
+        status_msg = await message.answer("📸 <b>Instagram Link Detected!</b>\n⏳ <i>Preparing download...</i>", parse_mode="HTML")
         download_id = db.add_download(user_id, url)
         file_path = None
+        progress_updater = ProgressUpdater(status_msg, "📸 <b>Instagram Download in Progress</b>")
         try:
-            file_path, size, title = await download_file(url, download_id)
+            file_path, size, title = await download_file(url, download_id, progress_callback=progress_updater)
 
             db.update_download_status(download_id, 'uploading', filename=os.path.basename(file_path), size=size)
             await status_msg.edit_text(f"📤 Uploading... ({format_size(size)})")
 
-            caption = f"📸 **{title}**\n\n✅ Done! {format_size(size)}"
+            caption = f"📸 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
             await send_file(message, file_path, caption=caption)
 
             db.update_download_status(download_id, 'completed')
@@ -139,24 +191,25 @@ async def handle_url(message: types.Message):
                 cleanup_file(file_path)
         return
 
-    status_msg = await message.answer("🔍 Checking...")
+    status_msg = await message.answer("🔍 <b>Checking URL...</b>", parse_mode="HTML")
     download_id = db.add_download(user_id, url)
     file_path = None
 
     try:
-        await status_msg.edit_text("⏳ Downloading...")
-        file_path, size, title = await download_file(url, download_id)
+        await status_msg.edit_text("⏳ <b>Downloading...</b>", parse_mode="HTML")
+        progress_updater = ProgressUpdater(status_msg, "⏳ <b>Downloading File</b>")
+        file_path, size, title = await download_file(url, download_id, progress_callback=progress_updater)
 
         db.update_download_status(download_id, 'uploading', filename=os.path.basename(file_path), size=size)
         await status_msg.edit_text(f"📤 Uploading... ({format_size(size)})")
 
         ext = os.path.splitext(file_path)[1].lower()
         if ext in ['.mp3', '.m4a', '.wav', '.flac', '.ogg']:
-            caption = f"🎵 **{title}**\n\n✅ Done! {format_size(size)}"
+            caption = f"🎵 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
         elif ext in ['.mp4', '.mkv', '.mov', '.avi']:
-            caption = f"🎬 **{title}**\n\n✅ Done! {format_size(size)}"
+            caption = f"🎬 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
         else:
-            caption = f"📄 **{title}**\n\n✅ Done! {format_size(size)}"
+            caption = f"📄 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
 
         await send_file(message, file_path, caption=caption)
 
@@ -209,7 +262,7 @@ async def process_yt_callback(callback: types.CallbackQuery, callback_data: YTCa
                 'preferredquality': quality if quality else '192',
             }],
         }
-        await callback.message.edit_text(f"🎵 Downloading Audio (MP3 - {quality}kbps)...")
+        await callback.message.edit_text(f"🎵 <b>Downloading Audio</b> (MP3 - {quality}kbps)...", parse_mode="HTML")
     else:
         if quality == "best":
             f_str = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
@@ -217,22 +270,24 @@ async def process_yt_callback(callback: types.CallbackQuery, callback_data: YTCa
             f_str = f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<={quality}][ext=mp4]/best"
 
         ytdlp_options = {'format': f_str}
-        await callback.message.edit_text(f"🎬 Downloading Video (MP4 - {quality}p)...")
+        await callback.message.edit_text(f"🎬 <b>Downloading Video</b> (MP4 - {quality}p)...", parse_mode="HTML")
 
     file_path = None
+    prefix = f"🎵 <b>Downloading Audio</b> ({quality}kbps)" if callback_data.action == "mp3" else f"🎬 <b>Downloading Video</b> ({quality}p)"
+    progress_updater = ProgressUpdater(callback.message, prefix)
     try:
-        file_path, size, title = await download_file(url, download_id, ytdlp_options)
+        file_path, size, title = await download_file(url, download_id, ytdlp_options, progress_callback=progress_updater)
 
         db.update_download_status(download_id, 'uploading', filename=os.path.basename(file_path), size=size)
         await callback.message.edit_text(f"📤 Uploading... ({format_size(size)})")
 
         ext = os.path.splitext(file_path)[1].lower()
         if ext in ['.mp3', '.m4a', '.wav', '.flac', '.ogg']:
-            caption = f"🎵 **{title}**\n\n✅ Done! {format_size(size)}"
+            caption = f"🎵 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
         elif ext in ['.mp4', '.mkv', '.mov', '.avi']:
-            caption = f"🎬 **{title}**\n\n✅ Done! {format_size(size)}"
+            caption = f"🎬 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
         else:
-            caption = f"📄 **{title}**\n\n✅ Done! {format_size(size)}"
+            caption = f"📄 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
 
         await send_file(callback.message, file_path, caption=caption)
 
