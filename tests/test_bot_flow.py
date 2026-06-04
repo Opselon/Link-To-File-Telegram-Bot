@@ -72,7 +72,7 @@ async def test_send_file_video():
     with patch('bot.FSInputFile') as mock_fs_input:
         from bot import send_file
         await send_file(message, file_path, caption)
-        message.answer_video.assert_called_once_with(mock_fs_input.return_value, caption=caption, parse_mode="Markdown")
+        message.answer_video.assert_called_once_with(mock_fs_input.return_value, caption=caption, parse_mode="HTML")
 
 @pytest.mark.asyncio
 async def test_send_file_audio():
@@ -83,7 +83,7 @@ async def test_send_file_audio():
     with patch('bot.FSInputFile') as mock_fs_input:
         from bot import send_file
         await send_file(message, file_path, caption)
-        message.answer_audio.assert_called_once_with(mock_fs_input.return_value, caption=caption, parse_mode="Markdown")
+        message.answer_audio.assert_called_once_with(mock_fs_input.return_value, caption=caption, parse_mode="HTML")
 
 @pytest.mark.asyncio
 async def test_send_file_document():
@@ -94,4 +94,4 @@ async def test_send_file_document():
     with patch('bot.FSInputFile') as mock_fs_input:
         from bot import send_file
         await send_file(message, file_path, caption)
-        message.answer_document.assert_called_once_with(mock_fs_input.return_value, caption=caption, parse_mode="Markdown")
+        message.answer_document.assert_called_once_with(mock_fs_input.return_value, caption=caption, parse_mode="HTML")

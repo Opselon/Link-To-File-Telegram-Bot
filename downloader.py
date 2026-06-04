@@ -24,8 +24,9 @@ def is_youtube_url(url: str) -> bool:
     return re.match(youtube_regex, url) is not None
 
 def is_instagram_url(url: str) -> bool:
+    """Checks if the URL is an Instagram URL."""
     instagram_regex = (
-        r'(https?://)?(www\.)?instagram\.com/(p|reels|reel|stories|tv|s)/[^/?#&]+'
+        r'(https?://)?(www\.)?(instagram\.com|instagr\.am|ig\.me)/(p|reels|reel|stories|tv|s|sh)/[^/?#&]+'
     )
     return re.match(instagram_regex, url) is not None
 
@@ -36,6 +37,17 @@ async def download_with_ytdlp(url: str, download_id: int, options: Optional[dict
         'max_filesize': MAX_FILE_SIZE_MB * 1024 * 1024,
         'quiet': True,
         'no_warnings': True,
+        'nocheckcertificate': True,
+        'no_color': True,
+        'ignoreerrors': False,
+        'logtostderr': False,
+        'concurrent_fragment_downloads': 10,
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Referer': 'https://www.google.com/',
+        }
     }
     if options:
         ydl_opts.update(options)

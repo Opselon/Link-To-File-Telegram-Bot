@@ -1,5 +1,5 @@
 import logging
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types, F, html
 from aiogram.filters import Command
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from aiogram.filters.callback_data import CallbackData
@@ -37,17 +37,17 @@ class YTCallback(CallbackData, prefix="yt"):
     download_id: int
     quality: Optional[str] = None
 
-async def send_file(message: Message, file_path: str, caption: str):
+async def send_file(message: Message, file_path: str, caption: str, parse_mode: str = "HTML"):
     """Sends a file as video, audio, or document based on its extension."""
     ext = os.path.splitext(file_path)[1].lower()
     document = FSInputFile(file_path)
 
     if ext in ['.mp4', '.mkv', '.mov', '.avi']:
-        await message.answer_video(document, caption=caption, parse_mode="Markdown")
+        await message.answer_video(document, caption=caption, parse_mode=parse_mode)
     elif ext in ['.mp3', '.m4a', '.wav', '.flac', '.ogg']:
-        await message.answer_audio(document, caption=caption, parse_mode="Markdown")
+        await message.answer_audio(document, caption=caption, parse_mode=parse_mode)
     else:
-        await message.answer_document(document, caption=caption, parse_mode="Markdown")
+        await message.answer_document(document, caption=caption, parse_mode=parse_mode)
 
 def get_yt_keyboard(download_id: int) -> InlineKeyboardMarkup:
     buttons = [
@@ -114,7 +114,7 @@ async def handle_url(message: types.Message):
             db.update_download_status(download_id, 'uploading', filename=os.path.basename(file_path), size=size)
             await status_msg.edit_text(f"📤 Uploading... ({format_size(size)})")
 
-            caption = f"📸 **{title}**\n\n✅ Done! {format_size(size)}"
+            caption = f"📸 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
             await send_file(message, file_path, caption=caption)
 
             db.update_download_status(download_id, 'completed')
@@ -152,11 +152,11 @@ async def handle_url(message: types.Message):
 
         ext = os.path.splitext(file_path)[1].lower()
         if ext in ['.mp3', '.m4a', '.wav', '.flac', '.ogg']:
-            caption = f"🎵 **{title}**\n\n✅ Done! {format_size(size)}"
+            caption = f"🎵 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
         elif ext in ['.mp4', '.mkv', '.mov', '.avi']:
-            caption = f"🎬 **{title}**\n\n✅ Done! {format_size(size)}"
+            caption = f"🎬 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
         else:
-            caption = f"📄 **{title}**\n\n✅ Done! {format_size(size)}"
+            caption = f"📄 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
 
         await send_file(message, file_path, caption=caption)
 
@@ -228,11 +228,11 @@ async def process_yt_callback(callback: types.CallbackQuery, callback_data: YTCa
 
         ext = os.path.splitext(file_path)[1].lower()
         if ext in ['.mp3', '.m4a', '.wav', '.flac', '.ogg']:
-            caption = f"🎵 **{title}**\n\n✅ Done! {format_size(size)}"
+            caption = f"🎵 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
         elif ext in ['.mp4', '.mkv', '.mov', '.avi']:
-            caption = f"🎬 **{title}**\n\n✅ Done! {format_size(size)}"
+            caption = f"🎬 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
         else:
-            caption = f"📄 **{title}**\n\n✅ Done! {format_size(size)}"
+            caption = f"📄 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
 
         await send_file(callback.message, file_path, caption=caption)
 

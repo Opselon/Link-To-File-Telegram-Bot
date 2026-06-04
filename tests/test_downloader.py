@@ -44,6 +44,9 @@ def test_is_instagram_url():
     assert is_instagram_url("https://www.instagram.com/reels/C_abc123/")
     assert is_instagram_url("https://www.instagram.com/reel/C_abc123/")
     assert is_instagram_url("https://www.instagram.com/stories/username/123456789/")
+    assert is_instagram_url("https://instagr.am/reel/C4p_8X9S-vV/")
+    assert is_instagram_url("https://ig.me/reels/C4p_8X9S-vV/")
+    assert is_instagram_url("https://www.instagram.com/sh/C4p_8X9S-vV/")
     assert not is_instagram_url("https://example.com/file.mp4")
 
 @pytest.mark.asyncio
