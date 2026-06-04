@@ -44,6 +44,9 @@ async def test_full_flow_success():
     status_msg = AsyncMock()
     message.answer.return_value = status_msg
 
+    async def mock_add_task(coro_func, *args, **kwargs):
+        await coro_func(*args, **kwargs)
+
     with patch('bot.is_valid_url', return_value=True), \
          patch('bot.is_safe_url', return_value=True), \
          patch('bot.check_rate_limit', return_value=True), \
@@ -51,7 +54,8 @@ async def test_full_flow_success():
          patch('bot.download_file', new_callable=AsyncMock) as mock_download, \
          patch('db.db.update_download_status') as mock_update_status, \
          patch('bot.FSInputFile') as mock_fs_input, \
-         patch('bot.cleanup_file') as mock_cleanup:
+         patch('bot.cleanup_file') as mock_cleanup, \
+         patch('bot.download_queue.add_task', side_effect=mock_add_task):
 
         mock_download.return_value = ("downloads/1_file.txt", 1024, "file.txt")
 
