@@ -1,7 +1,7 @@
 import pytest
 import aiohttp
 from aiohttp import web
-from downloader import download_file, cleanup_file, DownloadError
+from downloader import download_file, cleanup_file, DownloadError, is_youtube_url
 from config import DOWNLOADS_DIR
 import os
 
@@ -32,6 +32,12 @@ async def test_failed_download_404(mock_server):
     url = f"http://{mock_server.host}:{mock_server.port}/nonexistent"
     with pytest.raises(DownloadError):
         await download_file(url, 888)
+
+def test_is_youtube_url():
+    assert is_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+    assert is_youtube_url("https://youtu.be/dQw4w9WgXcQ")
+    assert is_youtube_url("https://www.youtube.com/embed/dQw4w9WgXcQ")
+    assert not is_youtube_url("https://example.com/file.mp4")
 
 @pytest.mark.asyncio
 async def test_timeout_download():

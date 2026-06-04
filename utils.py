@@ -2,6 +2,7 @@ import re
 import ipaddress
 from urllib.parse import urlparse
 import time
+import math
 from typing import Dict
 from config import RATE_LIMIT_SECONDS
 
@@ -52,7 +53,6 @@ def format_size(size_bytes: int) -> str:
     if size_bytes == 0:
         return "0B"
     size_name = ("B", "KB", "MB", "GB", "TB")
-    import math
     i = int(math.floor(math.log(size_bytes, 1024)))
     p = math.pow(1024, i)
     s = round(size_bytes / p, 2)
