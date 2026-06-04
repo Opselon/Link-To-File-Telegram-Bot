@@ -42,12 +42,33 @@ class Updater:
     def pull_latest(self):
         try:
             console.print("[yellow]Pulling latest changes from GitHub...[/yellow]")
+
+            # First, check if we have untracked/changed __pycache__ or other ignored files
+            # that might block the pull
+            console.print("[dim]Cleaning up untracked files...[/dim]")
+            subprocess.run(["git", "clean", "-fd", "__pycache__"], capture_output=True)
+
             result = subprocess.run(["git", "pull"], capture_output=True, text=True, check=True)
             console.print(f"[dim]{result.stdout}[/dim]")
             console.print("[green]Successfully pulled latest changes.[/green]")
             return True
         except subprocess.CalledProcessError as e:
-            console.print(f"[red]Git pull failed: {e.stderr}[/red]")
+            error_msg = e.stderr
+            console.print(f"[red]Git pull failed: {error_msg}[/red]")
+
+            if "overwritten by merge" in error_msg and "__pycache__" in error_msg:
+                console.print("[yellow]Found conflicting __pycache__ files. Attempting to clear them...[/yellow]")
+                subprocess.run(["find", ".", "-name", "__pycache__", "-type", "d", "-exec", "rm", "-rf", "{}", "+"], capture_output=True)
+
+                try:
+                    console.print("[yellow]Retrying git pull...[/yellow]")
+                    result = subprocess.run(["git", "pull"], capture_output=True, text=True, check=True)
+                    console.print(f"[dim]{result.stdout}[/dim]")
+                    console.print("[green]Successfully pulled latest changes.[/green]")
+                    return True
+                except subprocess.CalledProcessError as retry_e:
+                    console.print(f"[red]Retry failed: {retry_e.stderr}[/red]")
+
             return False
         except Exception as e:
             console.print(f"[red]Update failed: {e}[/red]")

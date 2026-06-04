@@ -2,6 +2,7 @@ import asyncio
 import sys
 import logging
 import argparse
+import shutil
 from pathlib import Path
 
 # Try to load version
@@ -33,6 +34,10 @@ def main():
         except KeyboardInterrupt:
             print("\nSetup cancelled.")
             sys.exit(1)
+
+    # Check for ffmpeg
+    if not shutil.which("ffmpeg"):
+        logging.warning("FFmpeg not found in PATH. YouTube downloads will likely fail.")
 
     # Now we can safely import and run the bot
     from bot import start_bot
