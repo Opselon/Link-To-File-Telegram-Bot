@@ -9,7 +9,8 @@ class Database:
         self.init_db()
 
     def get_connection(self):
-        conn = sqlite3.connect(self.db_path)
+        # Set timeout to 20 seconds to prevent "database is locked" errors
+        conn = sqlite3.connect(self.db_path, timeout=20)
         conn.row_factory = sqlite3.Row
         return conn
 

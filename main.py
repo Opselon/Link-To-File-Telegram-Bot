@@ -11,6 +11,31 @@ try:
 except ImportError:
     VERSION = "unknown"
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("bot.log")
+    ]
+)
+logger = logging.getLogger(__name__)
+
+def cleanup_downloads():
+    """Clean up any leftover files in the downloads directory on startup."""
+    from config import DOWNLOADS_DIR
+    if DOWNLOADS_DIR.exists():
+        for item in DOWNLOADS_DIR.iterdir():
+            try:
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item)
+                logger.info(f"Cleaned up old download artifact: {item.name}")
+            except Exception as e:
+                logger.error(f"Failed to cleanup {item.name}: {e}")
+
 def main():
     parser = argparse.ArgumentParser(description="Telegram File Downloader Bot")
     parser.add_argument("--update", action="store_true", help="Update the bot to the latest version")
@@ -48,6 +73,9 @@ def main():
     # Check for ffmpeg
     if not shutil.which("ffmpeg"):
         logging.warning("FFmpeg not found in PATH. YouTube downloads will likely fail.")
+
+    # Cleanup old downloads
+    cleanup_downloads()
 
     # Now we can safely import and run the bot
     from bot import start_bot
