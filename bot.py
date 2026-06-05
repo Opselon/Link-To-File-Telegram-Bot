@@ -8,13 +8,14 @@ from aiogram.client.telegram import TelegramAPIServer
 import os
 import asyncio
 import time
-from typing import Optional
+from typing import Optional, Callable
 
 from config import BOT_TOKEN, ADMIN_ID, MAX_FILE_SIZE_MB, TELEGRAM_API_URL
 from db import db
 from utils import is_valid_url, is_safe_url, check_rate_limit, format_size, get_progress_bar
 from downloader import download_file, cleanup_file, DownloadError, is_youtube_url, is_instagram_url
 from queue_manager import download_queue
+from upload_utils import ProgressFSInputFile
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -59,27 +60,45 @@ class ProgressUpdater:
         progress_text = get_progress_bar(downloaded, total, speed, eta)
         full_text = f"{self.prefix}\n\n{progress_text}"
 
-        # Use run_coroutine_threadsafe for thread safety (yt-dlp runs in a thread)
-        asyncio.run_coroutine_threadsafe(self.safe_edit(full_text), self.loop)
+        try:
+            # Check if we are in the main thread (aiogram/asyncio loop)
+            current_loop = asyncio.get_running_loop()
+            if current_loop == self.loop:
+                asyncio.create_task(self.safe_edit(full_text))
+            else:
+                asyncio.run_coroutine_threadsafe(self.safe_edit(full_text), self.loop)
+        except RuntimeError:
+            # If no loop is running in this thread, use run_coroutine_threadsafe
+            asyncio.run_coroutine_threadsafe(self.safe_edit(full_text), self.loop)
 
     async def safe_edit(self, text: str):
         try:
             await self.message.edit_text(text, parse_mode="HTML")
-        except Exception:
-            # Ignore errors like "message is not modified" or rate limits
-            pass
+        except Exception as e:
+            # Ignore "message is not modified" and rate limit errors
+            if "message is not modified" in str(e) or "retry after" in str(e):
+                return
+            logger.debug(f"Failed to edit progress message: {e}")
 
-async def send_file(message: Message, file_path: str, caption: str, parse_mode: str = "HTML"):
+async def send_file(message: Message, file_path: str, caption: str, progress_callback: Optional[Callable] = None, parse_mode: str = "HTML"):
     """Sends a file as video, audio, or document based on its extension."""
     ext = os.path.splitext(file_path)[1].lower()
-    document = FSInputFile(file_path)
 
-    if ext in ['.mp4', '.mkv', '.mov', '.avi']:
-        await message.answer_video(document, caption=caption, parse_mode=parse_mode)
-    elif ext in ['.mp3', '.m4a', '.wav', '.flac', '.ogg']:
-        await message.answer_audio(document, caption=caption, parse_mode=parse_mode)
+    if progress_callback:
+        document = ProgressFSInputFile(file_path, progress_callback=progress_callback)
     else:
-        await message.answer_document(document, caption=caption, parse_mode=parse_mode)
+        document = FSInputFile(file_path)
+
+    try:
+        if ext in ['.mp4', '.mkv', '.mov', '.avi']:
+            await message.answer_video(document, caption=caption, parse_mode=parse_mode)
+        elif ext in ['.mp3', '.m4a', '.wav', '.flac', '.ogg']:
+            await message.answer_audio(document, caption=caption, parse_mode=parse_mode)
+        else:
+            await message.answer_document(document, caption=caption, parse_mode=parse_mode)
+    except Exception as e:
+        logger.error(f"Error sending file {file_path}: {e}")
+        raise
 
 def get_yt_keyboard(download_id: int) -> InlineKeyboardMarkup:
     buttons = [
@@ -146,7 +165,10 @@ async def execute_download(message: Message, status_msg: Message, url: str, down
         file_path, size, title = await download_file(url, download_id, ytdlp_options, progress_callback=progress_updater)
 
         db.update_download_status(download_id, 'uploading', filename=os.path.basename(file_path), size=size)
-        await status_msg.edit_text(f"{prefix}\n📤 <b>Uploading...</b> ({format_size(size)})", parse_mode="HTML")
+
+        # Define progress callback for upload
+        upload_prefix = prefix.replace("Download", "Upload") if "Download" in prefix else f"{prefix} (Upload)"
+        upload_updater = ProgressUpdater(status_msg, upload_prefix)
 
         ext = os.path.splitext(file_path)[1].lower()
         if ext in ['.mp3', '.m4a', '.wav', '.flac', '.ogg']:
@@ -156,7 +178,7 @@ async def execute_download(message: Message, status_msg: Message, url: str, down
         else:
             caption = f"📄 <b>{html.quote(title)}</b>\n\n✅ Done! {format_size(size)}"
 
-        await send_file(message, file_path, caption=caption)
+        await send_file(message, file_path, caption=caption, progress_callback=upload_updater)
 
         db.update_download_status(download_id, 'completed')
         try:
@@ -287,9 +309,11 @@ async def process_yt_callback(callback: types.CallbackQuery, callback_data: YTCa
     await callback.answer("Added to download queue!")
 
 async def start_bot():
-    logger.info("Bot started...")
+    logger.info("Bot starting...")
     download_queue.start()
     try:
         await dp.start_polling(bot)
     finally:
+        logger.info("Bot shutting down...")
         await download_queue.stop()
+        await bot.session.close()
