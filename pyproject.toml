@@ -1,0 +1,7 @@
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = [".git", ".venv", "downloads", "data", "backup"]
+
+[tool.ruff.lint]
+select = ["E9", "F"]

@@ -1,165 +1,220 @@
+"""Interactive setup wizard (`python main.py --setup`).
+
+Also callable non-interactively so the one-line installer can reuse it:
+
+    python -c "from cli.wizard import run_wizard; run_wizard(bot_token='123:abc')"
+"""
+
+from __future__ import annotations
+
+import json
 import os
-import sys
 import shutil
+import sys
+import urllib.request
 from pathlib import Path
+from typing import Optional
+
+from dotenv import load_dotenv
+from rich import print as rprint
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Prompt, IntPrompt, Confirm
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
-from rich import print as rprint
-from dotenv import load_dotenv
+
+from core.version import VERSION
 
 console = Console()
+ENV_PATH = Path(".env")
 
-def show_welcome():
-    welcome_text = """
-[bold cyan]Telegram File Downloader Bot[/bold cyan]
-[dim]Modern Setup Wizard v1.1.0[/dim]
+WELCOME = f"""
+[bold cyan]⚡ Link → File[/bold cyan] [dim]v{VERSION}[/dim]
+[dim]Send any link, get a file back.[/dim]
 
-This wizard will help you configure your bot in seconds.
-    """
-    console.print(Panel(welcome_text, expand=False, border_style="cyan"))
+This wizard writes a ready-to-run [bold].env[/bold] in about 30 seconds.
+"""
 
-def check_ffmpeg():
-    if not shutil.which("ffmpeg"):
-        rprint("[yellow]⚠️  Warning: FFmpeg was not found in your PATH.[/yellow]")
-        rprint("[yellow]YouTube downloads might fail. It is recommended to install FFmpeg.[/yellow]")
-        rprint("[dim]On Ubuntu: sudo apt install ffmpeg[/dim]\n")
-        return False
-    return True
 
-def get_existing_config():
-    """Loads existing config from .env if it exists."""
-    if Path(".env").exists():
-        load_dotenv(".env", override=True)
+def show_welcome() -> None:
+    console.print(Panel(WELCOME.strip(), expand=False, border_style="cyan"))
 
+
+def check_ffmpeg() -> bool:
+    if shutil.which("ffmpeg"):
+        return True
+    rprint("[yellow]⚠  ffmpeg not found — YouTube/Instagram merging needs it.[/yellow]")
+    rprint("[dim]   Debian/Ubuntu: sudo apt install ffmpeg[/dim]")
+    rprint("[dim]   macOS:         brew install ffmpeg[/dim]\n")
+    return False
+
+
+def existing_config() -> dict[str, str]:
+    if ENV_PATH.exists():
+        load_dotenv(ENV_PATH, override=True)
     return {
         "BOT_TOKEN": os.getenv("BOT_TOKEN", ""),
         "ADMIN_ID": os.getenv("ADMIN_ID", ""),
-        "MAX_FILE_SIZE_MB": os.getenv("MAX_FILE_SIZE_MB", "100"),
-        "DOWNLOAD_TIMEOUT": os.getenv("DOWNLOAD_TIMEOUT", "300"),
+        "MAX_FILE_SIZE_MB": os.getenv("MAX_FILE_SIZE_MB", "2000"),
+        "DOWNLOAD_TIMEOUT": os.getenv("DOWNLOAD_TIMEOUT", "600"),
         "TELEGRAM_API_URL": os.getenv("TELEGRAM_API_URL", ""),
     }
 
-def run_wizard():
+
+def _token_looks_valid(token: str) -> bool:
+    head, _, tail = token.partition(":")
+    return head.isdigit() and len(tail) >= 20
+
+
+def verify_token(token: str) -> Optional[str]:
+    """Ask Telegram who this token belongs to. Returns the username or None."""
+    try:
+        request = urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/getMe",
+            headers={"User-Agent": "link-to-file-setup"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.load(response)
+        if payload.get("ok"):
+            return payload["result"].get("username")
+        rprint(f"[red]Telegram rejected the token: {payload.get('description')}[/red]")
+        return None
+    except Exception as exc:  # noqa: BLE001 - offline setup is allowed
+        rprint(f"[yellow]Could not verify the token ({exc}). Continuing.[/yellow]")
+        return "unverified"
+
+
+def _parse_ip_port(api_url: str) -> tuple[str, str]:
+    if not api_url:
+        return "127.0.0.1", "8081"
+    cleaned = api_url.replace("https://", "").replace("http://", "").strip("/")
+    host, _, port = cleaned.partition(":")
+    return host or "127.0.0.1", port or "8081"
+
+
+def run_wizard(
+    *,
+    bot_token: Optional[str] = None,
+    admin_id: Optional[int] = None,
+    max_size: Optional[int] = None,
+    timeout: Optional[int] = None,
+    api_url: Optional[str] = None,
+    yes: bool = False,
+    verify: bool = True,
+    env_path: Optional[Path] = None,
+) -> bool:
+    """Collect settings and write ``.env``. Returns True on success."""
+    target = Path(env_path) if env_path else ENV_PATH
     show_welcome()
     check_ffmpeg()
+    current = existing_config()
 
-    config = get_existing_config()
+    token = (bot_token or "").strip()
+    if not token:
+        token = Prompt.ask(
+            "[bold yellow]Bot token[/bold yellow] [dim](from @BotFather)[/dim]",
+            default=current["BOT_TOKEN"] or None,
+        )
+    token = (token or "").strip()
+    while not _token_looks_valid(token):
+        rprint("[red]That doesn't look like a bot token (123456:ABC…).[/red]")
+        token = Prompt.ask("[bold yellow]Bot token[/bold yellow]").strip()
 
-    # 1. Bot Token
-    bot_token = Prompt.ask(
-        "[bold yellow]Enter your Telegram Bot Token[/bold yellow] (from @BotFather)",
-        default=config["BOT_TOKEN"]
-    )
-    while not bot_token or ":" not in bot_token:
-        rprint("[red]Invalid token format. It usually looks like 123456:ABC-DEF...[/red]")
-        bot_token = Prompt.ask("[bold yellow]Enter your Telegram Bot Token[/bold yellow]")
+    if verify:
+        username = verify_token(token)
+        if username and username != "unverified":
+            rprint(f"[green]✔ Token works: @{username}[/green]")
 
-    # 2. Admin ID
-    admin_id = IntPrompt.ask(
-        "[bold yellow]Enter your Telegram Admin ID[/bold yellow] (use @userinfobot to find it)",
-        default=int(config["ADMIN_ID"]) if config["ADMIN_ID"] else None
-    )
-
-    # 3. Max File Size
-    max_size = IntPrompt.ask(
-        "[bold yellow]Enter Maximum File Size (MB)[/bold yellow]",
-        default=int(config["MAX_FILE_SIZE_MB"])
-    )
-
-    # 4. Advanced Settings
-    timeout = IntPrompt.ask(
-        "[bold blue]Download Timeout (seconds)[/bold blue]",
-        default=int(config["DOWNLOAD_TIMEOUT"])
-    )
-
-    telegram_api_url = config["TELEGRAM_API_URL"]
-    configure_api = Confirm.ask(
-        "[bold blue]Configure Custom Telegram Bot API URL?[/bold blue]",
-        default=bool(telegram_api_url)
-    )
-
-    if configure_api:
-        api_choice = Prompt.ask(
-            "How would you like to set the API URL?",
-            choices=["full", "ip_port"],
-            default="ip_port" if telegram_api_url and ":" in telegram_api_url.replace("http://", "").replace("https://", "") else "full"
+    if admin_id is None:
+        default_admin = int(current["ADMIN_ID"]) if current["ADMIN_ID"].isdigit() else None
+        admin_id = IntPrompt.ask(
+            "[bold yellow]Your Telegram user ID[/bold yellow] [dim](@userinfobot)[/dim]",
+            default=default_admin,
         )
 
-        if api_choice == "ip_port":
-            # Try to parse existing
-            existing_ip = "127.0.0.1"
-            existing_port = "8081"
-            if telegram_api_url:
-                parts = telegram_api_url.replace("http://", "").replace("https://", "").strip("/").split(":")
-                if len(parts) == 2:
-                    existing_ip, existing_port = parts
+    if max_size is None:
+        max_size = IntPrompt.ask(
+            "[bold yellow]Max file size (MB)[/bold yellow] [dim]1–2000[/dim]",
+            default=int(current["MAX_FILE_SIZE_MB"] or 2000),
+        )
+    max_size = max(1, min(2000, int(max_size)))
 
-            ip = Prompt.ask("Enter API Server IP", default=existing_ip)
-            port = IntPrompt.ask("Enter API Server Port", default=int(existing_port))
-            telegram_api_url = f"http://{ip}:{port}"
+    if timeout is None:
+        timeout = IntPrompt.ask(
+            "[bold blue]Download timeout (seconds)[/bold blue]",
+            default=int(current["DOWNLOAD_TIMEOUT"] or 600),
+        )
+
+    if api_url is None:
+        api_url = current["TELEGRAM_API_URL"]
+        if Confirm.ask(
+            "[bold blue]Use a self-hosted Telegram Bot API?[/bold blue] "
+            "[dim](needed for >50 MB uploads)[/dim]",
+            default=bool(api_url),
+        ):
+            choice = Prompt.ask(
+                "How do you want to enter it?",
+                choices=["ip_port", "full"],
+                default="ip_port",
+            )
+            if choice == "ip_port":
+                host, port = _parse_ip_port(api_url)
+                host = Prompt.ask("Bot API host", default=host)
+                port = Prompt.ask("Bot API port", default=port)
+                api_url = f"http://{host}:{port}"
+            else:
+                api_url = Prompt.ask("Full Bot API URL", default=api_url or "http://127.0.0.1:8081")
         else:
-            telegram_api_url = Prompt.ask("Enter Full Custom API URL", default=telegram_api_url)
-    else:
-        telegram_api_url = ""
+            api_url = ""
 
-    # 5. Summary
-    table = Table(title="Configuration Summary", show_header=True, header_style="bold magenta")
+    table = Table(title="Configuration", header_style="bold magenta", show_header=True)
     table.add_column("Setting", style="dim")
     table.add_column("Value")
-
-    table.add_row("Bot Token", f"{bot_token[:6]}...{bot_token[-4:]}" if bot_token else "None")
+    table.add_row("Bot token", f"{token[:8]}…{token[-4:]}" if token else "—")
     table.add_row("Admin ID", str(admin_id))
-    table.add_row("Max File Size", f"{max_size} MB")
-    table.add_row("Timeout", f"{timeout} seconds")
-    table.add_row("Telegram API URL", telegram_api_url or "Default")
+    table.add_row("Max file size", f"{max_size} MB")
+    table.add_row("Download timeout", f"{timeout}s")
+    table.add_row("Bot API", api_url or "Telegram cloud (50 MB limit)")
+    table.add_row("Config file", str(target.resolve()))
+    console.print("", table, "")
 
-    console.print("\n", table, "\n")
+    if not yes and not Confirm.ask("Save these settings?", default=True):
+        rprint("[red]Nothing saved.[/red]")
+        return False
 
-    if not Confirm.ask("Do you want to save these settings?"):
-        rprint("[red]Setup cancelled. Changes not saved.[/red]")
-        return
-
-    # 6. Saving Config
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        transient=True,
-    ) as progress:
-        progress.add_task(description="Saving configuration...", total=None)
-
-        env_content = f"""# Bot Configuration
-BOT_TOKEN={bot_token}
+    content = f"""# ⚡ Link → File — generated by the setup wizard
+# Docs: https://github.com/Opselon/Link-To-File-Telegram-Bot
+BOT_TOKEN={token}
 ADMIN_ID={admin_id}
 
-# Downloader Configuration
+# Limits
 MAX_FILE_SIZE_MB={max_size}
 DOWNLOAD_TIMEOUT={timeout}
+RATE_LIMIT_SECONDS=3
+QUEUE_CONCURRENCY=3
 
-# Optional: Custom Telegram Bot API (for files up to 2GB)
-TELEGRAM_API_URL={telegram_api_url}
+# Optional: self-hosted Bot API server (raises uploads to 2 GB)
+TELEGRAM_API_URL={api_url}
 """
-        with open(".env", "w") as f:
-            f.write(env_content)
+    target.write_text(content, encoding="utf-8")
+    try:
+        target.chmod(0o600)
+    except OSError:
+        pass
 
-        import time
-        time.sleep(1)
-
-    # 7. Initialize Database
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        transient=True,
-    ) as progress:
-        progress.add_task(description="Initializing database...", total=None)
+    try:
         from db import db
-        db.init_db()
-        time.sleep(1)
 
-    rprint("\n[bold green]✅ Setup Complete![/bold green]")
-    rprint("You can now start the bot by running: [cyan]python main.py[/cyan]\n")
+        db.init_db()
+    except Exception as exc:  # noqa: BLE001 - the bot re-creates the DB anyway
+        rprint(f"[yellow]Could not initialise the database now: {exc}[/yellow]")
+
+    rprint(f"[bold green]✅ Saved {target}[/bold green]")
+    if shutil.which("docker") and Path("docker-compose.yml").exists():
+        rprint("Start it with: [cyan]docker compose up -d[/cyan]  (or [cyan]python main.py[/cyan])")
+    else:
+        rprint("Start it with: [cyan]python main.py[/cyan]")
+    return True
+
 
 if __name__ == "__main__":
     try:

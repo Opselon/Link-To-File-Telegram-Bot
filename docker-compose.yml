@@ -1,0 +1,35 @@
+name: link-to-file
+
+services:
+  bot:
+    build: .
+    image: ghcr.io/opselon/link-to-file-telegram-bot:latest
+    container_name: link-to-file-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - bot-data:/data
+    extra_hosts:
+      - host.docker.internal:host-gateway  # lets PROXY_URL reach a host proxy
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bot-data:

@@ -1,108 +1,163 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from bot import handle_url, cmd_start
-from utils import is_valid_url, is_safe_url
+
+from bot import cmd_start, handle_url, send_file
+from downloader import DownloadError, DownloadResult
+from ui import blocked_url_text
+
+
+def _user(user_id: int = 123):
+    return SimpleNamespace(id=user_id, first_name="Test", username="tester")
+
+
+def _message(text: str, user_id: int = 123):
+    message = AsyncMock()
+    message.text = text
+    message.from_user = _user(user_id)
+    message.chat = SimpleNamespace(id=user_id)
+    message.answer = AsyncMock()
+    return message
+
+
+async def _run_now(coro_func, *args, **kwargs):
+    await coro_func(*args, **kwargs)
+
 
 @pytest.mark.asyncio
-async def test_cmd_start():
-    message = AsyncMock()
-    message.from_user.id = 123
-    message.answer = AsyncMock()
-
-    with patch('db.db.add_user') as mock_add_user:
+async def test_cmd_start_registers_and_answers():
+    message = _message("/start")
+    with patch("bot.db.add_user") as add_user:
         await cmd_start(message)
-        mock_add_user.assert_called_with(123)
-        message.answer.assert_called()
+        add_user.assert_called_once_with(123)
+    message.answer.assert_called_once()
+    assert message.answer.call_args.kwargs["reply_markup"] is not None
+
 
 @pytest.mark.asyncio
-async def test_handle_url_invalid():
-    message = AsyncMock()
-    message.text = "not a url"
-    message.from_user.id = 123
-    message.answer = AsyncMock()
-
+async def test_handle_url_ignores_plain_text():
+    message = _message("hello there")
     await handle_url(message)
-    # For invalid URL, it should just return (or answer if we wanted, but current code returns)
     message.answer.assert_not_called()
 
-@pytest.mark.asyncio
-async def test_handle_url_blocked_ip():
-    message = AsyncMock()
-    message.text = "http://127.0.0.1/secret"
-    message.from_user.id = 123
-    message.answer = AsyncMock()
 
+@pytest.mark.asyncio
+async def test_handle_url_blocks_private_ip():
+    message = _message("http://127.0.0.1/secret")
     await handle_url(message)
-    message.answer.assert_called_with("❌ This URL is not allowed (private/local IP or invalid).")
+    message.answer.assert_awaited_once_with(blocked_url_text(), parse_mode="HTML")
+
 
 @pytest.mark.asyncio
-async def test_full_flow_success():
-    message = AsyncMock()
-    message.text = "http://example.com/file.txt"
-    message.from_user.id = 123
+async def test_handle_url_shows_quality_menu_for_youtube():
+    message = _message("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+    with patch("bot.db.add_user"), patch("bot.db.add_download", return_value=9):
+        await handle_url(message)
+    kwargs = message.answer.call_args.kwargs
+    callbacks = [b.callback_data for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert any(cb.startswith("q:mp4:") for cb in callbacks)
 
-    status_msg = AsyncMock()
-    message.answer.return_value = status_msg
 
-    async def mock_add_task(coro_func, *args, **kwargs):
-        await coro_func(*args, **kwargs)
+@pytest.mark.asyncio
+async def test_handle_url_runs_a_direct_download(tmp_path):
+    message = _message("https://example.com/file.txt")
+    status = AsyncMock()
+    message.answer.return_value = status
+    output = tmp_path / "1_file.txt"
+    output.write_bytes(b"x" * 16)
+    result = DownloadResult(path=str(output), size=16, title="file.txt")
 
-    with patch('bot.is_valid_url', return_value=True), \
-         patch('bot.is_safe_url', return_value=True), \
-         patch('bot.check_rate_limit', return_value=True), \
-         patch('db.db.add_download', return_value=1), \
-         patch('bot.download_file', new_callable=AsyncMock) as mock_download, \
-         patch('db.db.update_download_status') as mock_update_status, \
-         patch('bot.FSInputFile') as mock_fs_input, \
-         patch('bot.ProgressFSInputFile') as mock_progress_fs, \
-         patch('os.path.getsize', return_value=1024), \
-         patch('bot.cleanup_file') as mock_cleanup, \
-         patch('bot.download_queue.add_task', side_effect=mock_add_task):
-
-        mock_download.return_value = ("downloads/1_file.txt", 1024, "file.txt")
-
+    with patch("bot.db.add_user"), patch("bot.db.add_download", return_value=1), \
+         patch("bot.download_file", new=AsyncMock(return_value=result)), \
+         patch("bot.send_file", new=AsyncMock()) as send, \
+         patch("bot.download_queue.add_task", side_effect=_run_now), \
+         patch("bot.db.update_download_status") as update, \
+         patch("bot.cleanup_file") as cleanup:
         await handle_url(message)
 
-        # In current implementation, edit_text is called:
-        # 1. "Added to queue" (in handle_url)
-        # 2. "Starting..." (in execute_download)
-        # However, if ProgressUpdater is used, it might skip edits due to interval
-        # But we expect at least 1 edit from execute_download
-        assert status_msg.edit_text.call_count >= 1
-        message.answer_document.assert_called()
-        assert mock_update_status.call_count >= 2
-        mock_cleanup.assert_called()
-        status_msg.delete.assert_called()
+    send.assert_awaited_once()
+    status.delete.assert_awaited_once()
+    cleanup.assert_called_once()
+    statuses = [call.args[1] for call in update.call_args_list]
+    assert "uploading" in statuses and "completed" in statuses
+
 
 @pytest.mark.asyncio
-async def test_send_file_video():
-    message = AsyncMock()
-    file_path = "downloads/video.mp4"
-    caption = "test caption"
+async def test_handle_url_reports_rate_limit():
+    message = _message("https://example.com/file.txt")
+    with patch("bot.rate_limit_remaining", return_value=4):
+        await handle_url(message)
+    assert "try again" in message.answer.call_args.args[0]
 
-    with patch('bot.FSInputFile') as mock_fs_input:
-        from bot import send_file
-        await send_file(message, file_path, caption)
-        message.answer_video.assert_called_once_with(mock_fs_input.return_value, caption=caption, parse_mode="HTML")
 
 @pytest.mark.asyncio
-async def test_send_file_audio():
-    message = AsyncMock()
-    file_path = "downloads/audio.mp3"
-    caption = "test caption"
+async def test_failed_download_offers_retry():
+    message = _message("https://example.com/file.txt")
+    status = AsyncMock()
+    message.answer.return_value = status
 
-    with patch('bot.FSInputFile') as mock_fs_input:
-        from bot import send_file
-        await send_file(message, file_path, caption)
-        message.answer_audio.assert_called_once_with(mock_fs_input.return_value, caption=caption, parse_mode="HTML")
+    with patch("bot.db.add_user"), patch("bot.db.add_download", return_value=2), \
+         patch("bot.download_file", new=AsyncMock(side_effect=DownloadError("nope"))), \
+         patch("bot.download_queue.add_task", side_effect=_run_now):
+        await handle_url(message)
+
+    assert "Couldn't finish" in status.edit_text.call_args.args[0]
+    assert status.edit_text.call_args.kwargs["reply_markup"] is not None
+
 
 @pytest.mark.asyncio
-async def test_send_file_document():
-    message = AsyncMock()
-    file_path = "downloads/doc.pdf"
-    caption = "test caption"
+async def test_send_file_picks_the_right_telegram_method(tmp_path):
+    for name, method in (
+        ("clip.mp4", "answer_video"),
+        ("song.mp3", "answer_audio"),
+        ("archive.zip", "answer_document"),
+    ):
+        path = tmp_path / name
+        path.write_bytes(b"data")
+        message = AsyncMock()
+        await send_file(message, str(path), "caption")
+        getattr(message, method).assert_awaited_once()
 
-    with patch('bot.FSInputFile') as mock_fs_input:
-        from bot import send_file
-        await send_file(message, file_path, caption)
-        message.answer_document.assert_called_once_with(mock_fs_input.return_value, caption=caption, parse_mode="HTML")
+
+@pytest.mark.asyncio
+async def test_send_file_streams_videos_with_metadata(tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"data")
+    message = AsyncMock()
+    result = DownloadResult(str(path), 4, "Clip", duration=65, width=1920, height=1080)
+    await send_file(message, str(path), "cap", result=result)
+    kwargs = message.answer_video.call_args.kwargs
+    assert kwargs["supports_streaming"] is True
+    assert kwargs["width"] == 1920 and kwargs["height"] == 1080
+    assert kwargs["duration"] == 65
+
+
+@pytest.mark.asyncio
+async def test_cancel_without_a_job_says_so():
+    from bot import cmd_cancel
+
+    message = _message("/cancel")
+    with patch.dict("bot._cancel_flags", {}, clear=True):
+        await cmd_cancel(message)
+    assert "Nothing is running" in message.answer.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_cancel_flags_a_running_job():
+    import asyncio
+
+    from bot import cmd_cancel
+
+    event = asyncio.Event()
+    message = _message("/cancel")
+    with patch.dict("bot._cancel_flags", {123: event}, clear=True):
+        await cmd_cancel(message)
+    assert event.is_set()
+    assert "cancelled" in message.answer.call_args.args[0].lower()
+
+
+def test_upload_limit_matches_api_mode():
+    import bot
+
+    assert bot.UPLOAD_LIMIT_MB == (2000 if bot.TELEGRAM_API_URL else 50)

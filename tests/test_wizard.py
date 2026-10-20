@@ -1,81 +1,77 @@
-import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
+
 from cli.wizard import run_wizard
-from pathlib import Path
 
-def test_wizard_flow():
-    # Enhanced wizard has more prompts
-    # 1. Bot Token: 123456:ABC-DEF
-    # 2. Admin ID: 987654321
-    # 3. Max Size: 200
-    # 4. Timeout: 600
-    # 5. Configure API (Confirm): True (or y)
-    # 6. API Choice: ip_port
-    # 7. IP: 1.2.3.4
-    # 8. Port: 8081
-    # 9. Save (Confirm): True (or y)
+TOKEN = "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
 
-    prompt_side_effects = ["123456:ABC-DEF", "ip_port", "1.2.3.4"]
-    int_prompt_side_effects = [987654321, 200, 600, 8081]
-    confirm_side_effects = [True, True]
 
-    with patch("rich.prompt.Prompt.ask", side_effect=prompt_side_effects), \
-         patch("rich.prompt.IntPrompt.ask", side_effect=int_prompt_side_effects), \
-         patch("rich.prompt.Confirm.ask", side_effect=confirm_side_effects), \
-         patch("db.db.init_db") as mock_db_init:
+def test_wizard_writes_env_without_prompts(tmp_path):
+    env_file = tmp_path / ".env"
+    saved = run_wizard(
+        bot_token=TOKEN,
+        admin_id=987654321,
+        max_size=200,
+        timeout=600,
+        api_url="http://1.2.3.4:8081",
+        yes=True,
+        verify=False,
+        env_path=env_file,
+    )
 
-        # Ensure .env doesn't exist before test
-        if os.path.exists(".env"):
-            os.rename(".env", ".env.bak")
+    assert saved is True
+    content = env_file.read_text()
+    assert f"BOT_TOKEN={TOKEN}" in content
+    assert "ADMIN_ID=987654321" in content
+    assert "MAX_FILE_SIZE_MB=200" in content
+    assert "DOWNLOAD_TIMEOUT=600" in content
+    assert "TELEGRAM_API_URL=http://1.2.3.4:8081" in content
+    assert oct(env_file.stat().st_mode)[-3:] == "600"
 
-        try:
-            run_wizard()
 
-            assert os.path.exists(".env")
-            with open(".env", "r") as f:
-                content = f.read()
-                assert "BOT_TOKEN=123456:ABC-DEF" in content
-                assert "ADMIN_ID=987654321" in content
-                assert "MAX_FILE_SIZE_MB=200" in content
-                assert "DOWNLOAD_TIMEOUT=600" in content
-                assert "TELEGRAM_API_URL=http://1.2.3.4:8081" in content
+def test_wizard_reprompts_on_bad_token(tmp_path):
+    env_file = tmp_path / ".env"
+    with patch("rich.prompt.Prompt.ask", side_effect=["invalid_token", TOKEN]) as prompt:
+        run_wizard(
+            bot_token="",
+            admin_id=1,
+            max_size=50,
+            timeout=300,
+            api_url="",
+            yes=True,
+            verify=False,
+            env_path=env_file,
+        )
+    assert prompt.call_count == 2
+    assert env_file.read_text().startswith("#")
 
-            mock_db_init.assert_called_once()
-        finally:
-            if os.path.exists(".env"):
-                os.remove(".env")
-            if os.path.exists(".env.bak"):
-                os.rename(".env.bak", ".env")
 
-def test_wizard_invalid_token():
-    # 1. Bot Token: invalid_token
-    # 2. Bot Token: 123456:ABC-DEF
-    # 3. Admin ID: 987654321
-    # 4. Max Size: 200
-    # 5. Timeout: 600
-    # 6. Configure API (Confirm): False
-    # 7. Save (Confirm): True
+def test_wizard_clamps_max_size(tmp_path):
+    env_file = tmp_path / ".env"
+    run_wizard(
+        bot_token=TOKEN,
+        admin_id=1,
+        max_size=99_999,
+        timeout=60,
+        api_url="",
+        yes=True,
+        verify=False,
+        env_path=env_file,
+    )
+    assert "MAX_FILE_SIZE_MB=2000" in env_file.read_text()
 
-    prompt_side_effects = ["invalid_token", "123456:ABC-DEF"]
-    int_prompt_side_effects = [987654321, 200, 600]
-    confirm_side_effects = [False, True]
 
-    # We need to track calls to Prompt.ask
-    with patch("rich.prompt.Prompt.ask", side_effect=prompt_side_effects) as mock_prompt, \
-         patch("rich.prompt.IntPrompt.ask", side_effect=int_prompt_side_effects), \
-         patch("rich.prompt.Confirm.ask", side_effect=confirm_side_effects), \
-         patch("db.db.init_db"):
-
-        # Mock rprint to avoid actual output
-        with patch("cli.wizard.rprint"):
-            if os.path.exists(".env"):
-                os.rename(".env", ".env.bak")
-            try:
-                run_wizard()
-                # 2 for token
-                assert mock_prompt.call_count == 2
-            finally:
-                if os.path.exists(".env"):
-                    os.remove(".env")
-                if os.path.exists(".env.bak"):
-                    os.rename(".env.bak", ".env")
+def test_wizard_respects_declined_save(tmp_path):
+    env_file = tmp_path / ".env"
+    with patch("rich.prompt.Confirm.ask", return_value=False):
+        saved = run_wizard(
+            bot_token=TOKEN,
+            admin_id=1,
+            max_size=50,
+            timeout=300,
+            api_url="",
+            yes=False,
+            verify=False,
+            env_path=env_file,
+        )
+    assert saved is False
+    assert not env_file.exists()

@@ -1,104 +1,223 @@
-import asyncio
-import sys
-import logging
+"""Entry point: environment checks, logging, signal handling, polling."""
+
+from __future__ import annotations
+
 import argparse
+import asyncio
+import logging
 import shutil
-from pathlib import Path
+import signal
+import sys
+from logging.handlers import RotatingFileHandler
 
-# Try to load version
-try:
-    from core.version import VERSION
-except ImportError:
-    VERSION = "unknown"
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("bot.log")
-    ]
+from config import (
+    BOT_TOKEN,
+    DATA_DIR,
+    DOWNLOADS_DIR,
+    LOG_LEVEL,
+    MAX_FILE_SIZE_MB,
+    QUEUE_CONCURRENCY,
+    TELEGRAM_API_URL,
 )
-logger = logging.getLogger(__name__)
+from core.version import VERSION
 
-def cleanup_downloads():
-    """Clean up any leftover files in the downloads directory on startup."""
-    from config import DOWNLOADS_DIR
-    if DOWNLOADS_DIR.exists():
-        for item in DOWNLOADS_DIR.iterdir():
-            try:
-                if item.is_file():
-                    item.unlink()
-                elif item.is_dir():
-                    shutil.rmtree(item)
-                logger.info(f"Cleaned up old download artifact: {item.name}")
-            except Exception as e:
-                logger.error(f"Failed to cleanup {item.name}: {e}")
+logger = logging.getLogger("linktofile")
 
-def main():
-    parser = argparse.ArgumentParser(description="Telegram File Downloader Bot")
-    parser.add_argument("--update", action="store_true", help="Update the bot to the latest version")
-    parser.add_argument("--version", action="store_true", help="Show the current version")
-    parser.add_argument("--setup", action="store_true", help="Run the configuration wizard")
+
+def setup_logging() -> None:
+    level = getattr(logging, LOG_LEVEL, logging.INFO)
+    formatter = logging.Formatter("%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+    try:
+        handlers.append(
+            RotatingFileHandler(
+                DATA_DIR / "bot.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+            )
+        )
+    except OSError:
+        pass
+    logging.basicConfig(level=level, handlers=handlers, force=True)
+    for handler in handlers:
+        handler.setFormatter(formatter)
+    logging.getLogger("aiogram.event").setLevel(logging.WARNING)
+
+
+def cleanup_downloads() -> None:
+    """Remove leftover files from a previous run (a crash leaves them behind)."""
+    if not DOWNLOADS_DIR.exists():
+        return
+    removed = 0
+    for item in DOWNLOADS_DIR.iterdir():
+        try:
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+            removed += 1
+        except OSError as exc:
+            logger.warning("Could not clean %s: %s", item.name, exc)
+    if removed:
+        logger.info("Cleaned %s leftover download artifact(s).", removed)
+
+
+def print_banner() -> None:
+    logger.info("⚡ Link → File v%s", VERSION)
+    logger.info("   data=%s · workers=%s · max=%sMB", DATA_DIR, QUEUE_CONCURRENCY, MAX_FILE_SIZE_MB)
+    if TELEGRAM_API_URL:
+        logger.info("   Bot API: %s", TELEGRAM_API_URL)
+    if not shutil.which("ffmpeg"):
+        logger.warning("FFmpeg not found: YouTube/Instagram merging will fail.")
+
+
+async def heartbeat(stop: asyncio.Event) -> None:
+    """Touch a file so container health checks can see the loop is alive."""
+    from config import HEARTBEAT_FILE
+
+    while not stop.is_set():
+        try:
+            HEARTBEAT_FILE.write_text(str(int(asyncio.get_running_loop().time())))
+        except OSError:
+            pass
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=15)
+        except asyncio.TimeoutError:
+            continue
+
+
+async def run_bot() -> None:
+    from bot import dp, start_bot
+
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+    beat_stop = asyncio.Event()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop_event.set)
+        except NotImplementedError:  # pragma: no cover - Windows
+            pass
+
+    polling = asyncio.create_task(start_bot())
+    beat = asyncio.create_task(heartbeat(beat_stop))
+    stop_task = asyncio.create_task(stop_event.wait())
+
+    await asyncio.wait({polling, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+    stop_task.cancel()
+    if stop_event.is_set():
+        logger.info("Stop requested, closing polling…")
+        try:
+            await dp.stop_polling()
+        except Exception:  # noqa: BLE001 - already stopping
+            pass
+    try:
+        await asyncio.wait_for(polling, timeout=30)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        polling.cancel()
+    beat_stop.set()
+    await asyncio.gather(beat, return_exceptions=True)
+
+
+async def stop_event_wait(event: asyncio.Event) -> None:
+    await event.wait()
+
+
+async def check_environment() -> int:
+    """`--check`: validate token, ffmpeg and storage before starting."""
+    import aiohttp
+
+    ok = True
+    if not BOT_TOKEN:
+        print("✖ BOT_TOKEN is not set")
+        return 1
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"{TELEGRAM_API_URL or 'https://api.telegram.org'}/bot{BOT_TOKEN}/getMe"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                payload = await response.json()
+        if payload.get("ok"):
+            me = payload["result"]
+            print(f"✔ Telegram token valid: @{me.get('username')} ({me.get('id')})")
+        else:
+            print(f"✖ Telegram rejected the token: {payload.get('description')}")
+            ok = False
+    except Exception as exc:  # noqa: BLE001
+        print(f"✖ Could not reach Telegram: {exc}")
+        ok = False
+
+    if shutil.which("ffmpeg"):
+        print("✔ ffmpeg found")
+    else:
+        print("⚠ ffmpeg missing — media merging will fail (apt install ffmpeg)")
+    try:
+        probe = DATA_DIR / ".write-test"
+        probe.write_text("ok")
+        probe.unlink()
+        print(f"✔ {DATA_DIR} is writable")
+    except OSError as exc:
+        print(f"✖ {DATA_DIR} is not writable: {exc}")
+        ok = False
+    return 0 if ok else 1
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="linktofile",
+        description="Link → File: a fast Telegram downloader bot.",
+    )
+    parser.add_argument("--setup", action="store_true", help="run the configuration wizard")
+    parser.add_argument("--check", action="store_true", help="validate token, ffmpeg and storage")
+    parser.add_argument("--update", action="store_true", help="update to the latest release")
+    parser.add_argument("--version", action="store_true", help="print the version")
     args = parser.parse_args()
 
     if args.version:
-        print(f"Telegram File Downloader Bot v{VERSION}")
+        print(f"Link → File v{VERSION}")
         return
 
     if args.update:
         from core.updater import update_system
+
         update_system()
         return
 
-    if args.setup:
-        from cli.wizard import run_wizard
-        try:
-            run_wizard()
-        except KeyboardInterrupt:
-            print("\nSetup cancelled.")
-            sys.exit(1)
-        return
+    setup_logging()
 
-    # Check if configured
-    if not Path(".env").exists():
-        from cli.wizard import run_wizard
-        try:
-            run_wizard()
-        except KeyboardInterrupt:
-            print("\nSetup cancelled.")
-            sys.exit(1)
+    if args.check:
+        sys.exit(asyncio.run(check_environment()))
 
-    # Check for ffmpeg
-    if not shutil.which("ffmpeg"):
-        logging.warning("FFmpeg not found in PATH. YouTube downloads will likely fail.")
+    if args.setup or not BOT_TOKEN:
+        if args.setup or sys.stdin.isatty():
+            from cli.wizard import run_wizard
 
-    # Cleanup old downloads
+            try:
+                run_wizard()
+            except KeyboardInterrupt:
+                print("\nSetup cancelled.")
+                sys.exit(1)
+            if args.setup:
+                return
+        if not BOT_TOKEN:
+            print(
+                "✖ BOT_TOKEN is missing.\n\n"
+                "Get one from @BotFather, then either:\n"
+                "  • run: python main.py --setup\n"
+                "  • or put BOT_TOKEN=123:ABC… in a .env file next to main.py\n"
+                "  • or run the Docker installer: curl -fsSL "
+                "https://raw.githubusercontent.com/Opselon/Link-To-File-Telegram-Bot/main/install.sh | bash"
+            )
+            sys.exit(2)
+
     cleanup_downloads()
-
-    # Now we can safely import and run the bot
-    from bot import start_bot
-    from config import BOT_TOKEN, TELEGRAM_API_URL
-
-    if not BOT_TOKEN:
-        print("Error: BOT_TOKEN is not set. Please run the wizard using --setup or check your .env file.")
-        sys.exit(1)
-
-    if TELEGRAM_API_URL is None:
-        print("Warning: TELEGRAM_API_URL is not set in .env.")
-        print("It's highly recommended to run the setup wizard to ensure all settings are configured correctly.")
-        print("Run: python main.py --setup")
-        # Optional: Force run wizard if it's a new version that requires more config?
-        # For now, just a warning as it might still work with defaults for some users.
+    print_banner()
 
     try:
-        asyncio.run(start_bot())
+        asyncio.run(run_bot())
     except KeyboardInterrupt:
         print("\nBot stopped.")
-    except Exception as e:
-        logging.exception("Fatal error")
+    except Exception:
+        logging.getLogger(__name__).exception("Fatal error")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

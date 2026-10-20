@@ -2,6 +2,16 @@ __pycache__/
 *.py[cod]
 *$py.class
 .env
+.env.*
+!.env.example
 .pytest_cache/
+.ruff_cache/
 *.db
+*.db-wal
+*.db-shm
 downloads/
+data/
+backup/
+bot.log*
+.venv/
+venv/
