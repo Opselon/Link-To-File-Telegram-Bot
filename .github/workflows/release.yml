@@ -1,0 +1,176 @@
+name: Release
+
+# Bump core/version.py on main -> a tag, a GitHub release with source archives,
+# and a multi-arch container image are produced automatically.
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/link-to-file-telegram-bot
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      publish: ${{ steps.meta.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version and decide whether to publish
+        id: meta
+        run: |
+          set -euo pipefail
+          version=$(python - <<'PY'
+          import re, pathlib
+          text = pathlib.Path("core/version.py").read_text()
+          print(re.search(r'"([0-9]+\.[0-9]+\.[0-9]+)"', text).group(1))
+          PY
+          )
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF_NAME}"
+            publish=true
+          else
+            tag="v${version}"
+            if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+              echo "Tag ${tag} already exists — nothing to publish."
+              publish=false
+            else
+              publish=true
+            fi
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "publish=${publish}" >> "$GITHUB_OUTPUT"
+          echo "### ${tag} (publish: ${publish})" >> "$GITHUB_STEP_SUMMARY"
+
+  test:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check --select E9,F .
+      - run: PYTHONPATH=. pytest -q
+
+  image:
+    needs: [prepare, test]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.prepare.outputs.tag }}
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/') }}
+            type=sha,format=short
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    needs: [prepare, test]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create tag (main only) and source archives
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
+            git tag -a "${TAG}" -m "Release ${TAG}"
+            git push origin "refs/tags/${TAG}"
+          fi
+          mkdir -p dist
+          prefix="link-to-file-${TAG}/"
+          git archive --format=zip --prefix="${prefix}" -o "dist/link-to-file-${TAG}.zip" "${TAG}"
+          git archive --format=tar.gz --prefix="${prefix}" -o "dist/link-to-file-${TAG}.tar.gz" "${TAG}"
+          (cd dist && sha256sum ./*.zip ./*.tar.gz > SHA256SUMS.txt)
+          ls -lh dist
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "${TAG}" --title "⚡ Link → File ${TAG}" --generate-notes || true
+
+          cat > header.md <<EOF
+          ### Run it in one line
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh | bash
+          \`\`\`
+
+          ### Docker
+
+          \`\`\`bash
+          docker pull ghcr.io/${GITHUB_REPOSITORY_OWNER}/link-to-file-telegram-bot:${TAG}
+          docker run -d --name link-to-file --restart unless-stopped \\
+            -e BOT_TOKEN=<your-token> -e ADMIN_ID=<your-id> \\
+            -v link-to-file-data:/data \\
+            ghcr.io/${GITHUB_REPOSITORY_OWNER}/link-to-file-telegram-bot:${TAG}
+          \`\`\`
+
+          Full changelog below.
+          EOF
+
+          gh release view "${TAG}" --json body -q .body > body.md
+          cat header.md > notes.md
+          echo >> notes.md
+          cat body.md >> notes.md
+          gh release edit "${TAG}" --notes-file notes.md --title "⚡ Link → File ${TAG}"
+          gh release upload "${TAG}" dist/* --clobber
+
+      - name: Summary
+        run: |
+          echo "Published ${{ needs.prepare.outputs.tag }} with source archives and a multi-arch image." >> "$GITHUB_STEP_SUMMARY"
