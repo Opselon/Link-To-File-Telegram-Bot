@@ -436,6 +436,7 @@ async def _enqueue(
     _cancel_flags[user_id] = cancel_event
     _inflight[download_id] = user_id
 
+    position = download_queue.pending + download_queue.active
     try:
         await download_queue.add_task(
             execute_download,
@@ -453,6 +454,12 @@ async def _enqueue(
         await status.edit_text(ui.queue_full_text(), parse_mode="HTML")
         db.update_download_status(download_id, "failed")
         return False
+    if position:
+        await safe_edit(
+            status,
+            f"{header}\n\n⏳ <b>Queued</b> · {position} ahead of you",
+            reply_markup=ui.progress_menu(download_id),
+        )
     return True
 
 
