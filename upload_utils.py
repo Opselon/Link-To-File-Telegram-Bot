@@ -31,8 +31,10 @@ class ProgressFSInputFile(FSInputFile):
         self.start_time: Optional[float] = None
 
     async def read(self, bot: Bot) -> AsyncGenerator[bytes, None]:
-        if self.start_time is None:
-            self.start_time = time.monotonic()
+        # aiogram can open the same source more than once (retries, re-uploads).
+        # Progress belongs to the current attempt, never to the sum of all of them.
+        self.sent_bytes = 0
+        self.start_time = time.monotonic()
 
         async with aiofiles.open(self.path, "rb") as file:
             while chunk := await file.read(self.chunk_size):
@@ -40,11 +42,12 @@ class ProgressFSInputFile(FSInputFile):
 
                 if self.progress_callback:
                     elapsed = max(time.monotonic() - self.start_time, 1e-6)
-                    speed = self.sent_bytes / elapsed
-                    remaining = max(self.total_size - self.sent_bytes, 0)
+                    sent = min(self.sent_bytes, self.total_size)
+                    speed = sent / elapsed
+                    remaining = max(self.total_size - sent, 0)
                     eta = remaining / speed if speed > 0 else 0
                     result = self.progress_callback(
-                        self.sent_bytes, self.total_size, speed, eta
+                        sent, self.total_size, speed, eta
                     )
                     if result is not None and asyncio.iscoroutine(result):
                         await result

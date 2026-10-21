@@ -104,6 +104,9 @@ All settings are environment variables (`.env` is read automatically). Only the 
 | `YTDLP_PROXY` | `PROXY_URL` | Media-only proxy (keeps direct downloads direct) |
 | `YTDLP_COOKIES_FILE` | — | Netscape `cookies.txt` for bot-checked sites |
 | `BOT_DISPLAY_NAME` | — | Optional BotFather display name |
+| `MIN_FREE_DISK_MB` | `512` | Refuse new jobs below this free space |
+| `TEMP_FILE_TTL` | `900` | Seconds before orphaned temp files are swept |
+| `MAX_PENDING_PER_USER` | `2` | Per-user queue depth |
 | `DATA_DIR` | project dir | Database, logs, temp files (`/data` in Docker) |
 | `LOG_LEVEL` | `INFO` | `DEBUG` for troubleshooting |
 

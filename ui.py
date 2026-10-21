@@ -21,7 +21,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from config import (
     GITHUB_REPO,
     ISSUES_URL,
-    MAX_FILE_SIZE_MB,
+    UPLOAD_LIMIT_MB,
     RELEASES_URL,
     REPO_URL,
 )
@@ -229,7 +229,7 @@ def welcome(user, *, is_admin: bool = False) -> str:
         "<blockquote>"
         "🎬 YouTube, Instagram, TikTok, X and 1000+ sites via the extractor\n"
         "📄 Direct links: zip, pdf, mp4, mp3, images…\n"
-        f"📦 Up to <b>{MAX_FILE_SIZE_MB} MB</b> per file · 🆓 free · ⚡ parallel downloads"
+        f"📦 Up to <b>{UPLOAD_LIMIT_MB} MB</b> per file · 🆓 free · ⚡ parallel downloads"
         "</blockquote>\n"
         "<b>Just paste a URL below to start.</b>"
     )
@@ -249,7 +249,7 @@ def help_text() -> str:
         "• /id — show your Telegram ID\n\n"
         "<b>Good to know</b>\n"
         "• Private or DRM-protected media can't be fetched.\n"
-        f"• Files over {MAX_FILE_SIZE_MB} MB are rejected before downloading.\n"
+        f"• Files over {UPLOAD_LIMIT_MB} MB (Telegram's cap) are refused up front.\n"
         "• Temporary files are deleted right after upload."
     )
 
@@ -305,6 +305,10 @@ def missing_download_text() -> str:
 
 def rate_limited_text(seconds: int) -> str:
     return f"⏳ Easy there — try again in <b>{max(1, seconds)}s</b>."
+
+
+def too_many_jobs_text() -> str:
+    return "<b>⏳ Too many in-flight downloads.</b>\nWait for one to finish or cancel it, then try again."
 
 
 def queue_full_text() -> str:

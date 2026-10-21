@@ -161,3 +161,119 @@ def test_upload_limit_matches_api_mode():
     import bot
 
     assert bot.UPLOAD_LIMIT_MB == (2000 if bot.TELEGRAM_API_URL else 50)
+
+
+def test_quality_ladder_prefers_progressive_and_respects_cap():
+    from bot import video_format
+
+    cap = 50 * 1024 * 1024
+    ladder = video_format("360", cap)
+    first = ladder.split("/")[0]
+    assert first.startswith("b[height<=360]")       # single file, no merge
+    assert f"filesize<{cap}" in first               # capped before download
+
+    best = video_format("best", cap)
+    assert best.startswith("b[") and f"filesize<{cap}" in best.split("/")[0]
+
+
+@pytest.mark.asyncio
+async def test_upload_progress_never_exceeds_total(tmp_path):
+    from upload_utils import ProgressFSInputFile
+
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"a" * 10)
+    reports = []
+
+    source = ProgressFSInputFile(str(path), chunk_size=4)
+    source.progress_callback = lambda sent, total, speed, eta: reports.append(sent)
+
+    await _drain(source)
+    await _drain(source)  # aiogram may read the same source twice
+
+    assert reports and max(reports) <= 10
+
+
+async def _drain(source):
+    from unittest.mock import MagicMock
+
+    async for _ in source.read(MagicMock()):
+        pass
+
+
+def test_stale_files_are_swept_but_active_ones_stay(tmp_path, monkeypatch):
+    import os
+    import time
+
+    import bot
+
+    stale = bot.DOWNLOADS_DIR / "9911_old.bin"
+    stale.write_bytes(b"x")
+    active = bot.DOWNLOADS_DIR / "9912_busy.bin"
+    active.write_bytes(b"x")
+    old = time.time() - 7_200
+    os.utime(stale, (old, old))
+    os.utime(active, (old, old))
+
+    monkeypatch.setattr(bot, "TEMP_FILE_TTL", 60)
+    monkeypatch.setitem(bot._inflight, 9912, 42)
+    try:
+        bot._sweep_temp_files()
+        assert not stale.exists()
+        assert active.exists()
+    finally:
+        bot._inflight.pop(9912, None)
+        active.unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_per_user_pending_cap(monkeypatch):
+    import bot
+
+    class Status:
+        def __init__(self):
+            self.text = ""
+
+        async def edit_text(self, text, **kwargs):
+            self.text = text
+
+    class Message:
+        class from_user:
+            id = 4242
+
+    monkeypatch.setattr(bot, "MAX_PENDING_PER_USER", 1)
+    monkeypatch.setattr(bot.db, "update_download_status", lambda *a, **k: None)
+    bot._inflight[1234] = 4242
+    status = Status()
+    try:
+        accepted = await bot._enqueue(Message(), status, "http://x/y", 5678, "h", user_id=4242)
+    finally:
+        bot._inflight.pop(1234, None)
+    assert accepted is False
+    assert "Too many" in status.text
+
+
+@pytest.mark.asyncio
+async def test_failed_upload_still_deletes_the_file(tmp_path):
+    import bot
+    from downloader import DownloadResult
+
+    produced = bot.DOWNLOADS_DIR / "5555_clip.mp4"
+    produced.write_bytes(b"z" * 32)
+
+    async def fake_download(*args, **kwargs):
+        return DownloadResult(path=str(produced), size=32, title="clip")
+
+    status = AsyncMock()
+    message = _message("https://example.com/clip.mp4")
+
+    with (
+        patch("bot.download_file", fake_download),
+        patch("bot.send_file", AsyncMock(side_effect=RuntimeError("telegram died"))),
+        patch("bot.db.update_download_status"),
+        patch("bot.safe_edit", AsyncMock()),
+    ):
+        await bot.execute_download(message, status, "https://example.com/clip.mp4", 5555, "h")
+
+    assert not produced.exists()
+    assert not list(bot.DOWNLOADS_DIR.glob("5555_*"))
+    assert 5555 not in bot._inflight
