@@ -3,7 +3,7 @@
 import re
 from pathlib import Path
 
-from core.version import VERSION
+from linktofile.infrastructure.system.version import VERSION
 
 ROOT = Path(__file__).resolve().parent.parent
 

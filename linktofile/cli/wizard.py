@@ -22,7 +22,7 @@ from rich.panel import Panel
 from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 
-from core.version import VERSION
+from linktofile.infrastructure.system.version import VERSION
 
 console = Console()
 ENV_PATH = Path(".env")

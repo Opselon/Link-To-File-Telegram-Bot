@@ -13,12 +13,21 @@ os.environ.setdefault("BOT_TOKEN", "123456:TEST-TOKEN-FOR-UNIT-TESTS-ONLY")
 os.environ.setdefault("ADMIN_ID", "1")
 os.environ.setdefault("RATE_LIMIT_SECONDS", "0")
 os.environ.setdefault("QUEUE_CONCURRENCY", "2")
+os.environ.pop("TELEGRAM_API_URL", None)
 
 
 @pytest.fixture(autouse=True)
 async def _close_http_session():
     """The pooled download session is loop-bound; close it per test."""
     yield
-    import downloader
+    from linktofile.infrastructure.download.engine import close_session
 
-    await downloader.close_session()
+    await close_session()
+
+
+@pytest.fixture
+def database(tmp_path):
+    from linktofile.infrastructure.persistence.sqlite import Database
+
+    return Database(tmp_path / "test.db")
+

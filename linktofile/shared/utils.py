@@ -9,7 +9,7 @@ import time
 from typing import Dict
 from urllib.parse import urlparse
 
-from config import RATE_LIMIT_SECONDS
+from linktofile.config import RATE_LIMIT_SECONDS
 
 # ANSI escape codes (yt-dlp likes to colour its errors).
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
@@ -201,3 +201,30 @@ def get_progress_bar(
         f"<b>{format_size(downloaded)}</b> of <b>{total_label}</b>\n"
         f"⚡ {format_speed(speed)}   ⏳ {format_eta(eta)}"
     )
+
+
+# ---- media detection --------------------------------------------------------
+MEDIA_HINTS = (
+    "youtube.com", "youtu.be", "instagram.com", "tiktok.com", "twitter.com",
+    "x.com", "facebook.com", "fb.watch", "vimeo.com", "reddit.com", "redd.it",
+    "soundcloud.com", "twitch.tv", "pinterest.com", "dailymotion.com", "dai.ly",
+    "bilibili.com", "vk.com", "vkvideo.ru", "rumble.com", "odysee.com",
+    "streamable.com", "spotify.com", "snapchat.com",
+)
+AUDIO_HINTS = ("soundcloud.com", "spotify.com", "music.")
+
+AUDIO_EXTS = (
+    ".mp3", ".m4a", ".wav", ".flac", ".ogg", ".opus", ".aac", ".wma",
+)
+VIDEO_EXTS = (
+    ".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".ts", ".3gp", ".flv",
+)
+
+
+def is_media_url(url: str) -> bool:
+    """True when this is a media page (yt-dlp) rather than a plain file link."""
+    lowered = url.lower()
+    path = lowered.split("?", 1)[0].split("&", 1)[0]
+    if any(path.endswith(ext) for ext in AUDIO_EXTS + VIDEO_EXTS):
+        return True
+    return any(host in lowered for host in MEDIA_HINTS)

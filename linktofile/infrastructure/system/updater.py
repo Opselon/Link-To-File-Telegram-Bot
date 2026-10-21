@@ -17,8 +17,8 @@ from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 
-from config import GITHUB_REPO
-from core.version import VERSION
+from linktofile.config import GITHUB_REPO
+from linktofile.infrastructure.system.version import VERSION
 
 console = Console()
 logger = logging.getLogger(__name__)

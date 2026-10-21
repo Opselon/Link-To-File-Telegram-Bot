@@ -1,0 +1,165 @@
+"""Bounded, fair work queue for downloads.
+
+One queue, N workers, one *real* asyncio task per job so ``cancel()`` can
+interrupt a stalled socket instead of waiting for the next progress tick.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Any, Callable, Coroutine, Optional
+
+from linktofile.domain.errors import QueueSaturated
+from linktofile.domain.models import QueueSnapshot
+
+logger = logging.getLogger(__name__)
+
+Job = Callable[..., Coroutine[Any, Any, Any]]
+
+
+@dataclass(slots=True)
+class _Item:
+    func: Job
+    args: tuple = ()
+    kwargs: dict = field(default_factory=dict)
+    key: Optional[int] = None
+    user_id: Optional[int] = None
+
+
+class DownloadQueue:
+    def __init__(
+        self,
+        *,
+        concurrency: int = 3,
+        max_size: int = 200,
+        per_user_limit: int = 2,
+        task_timeout: float = 1800,
+    ) -> None:
+        self._queue: asyncio.Queue[_Item] = asyncio.Queue(maxsize=max_size)
+        self.concurrency = max(1, int(concurrency))
+        self.per_user_limit = max(1, int(per_user_limit))
+        self.task_timeout = float(task_timeout)
+        self._workers: list[asyncio.Task] = []
+        self._running = False
+        self._active = 0
+        self._tasks: dict[int, asyncio.Task] = {}
+        self._cancelled: set[int] = set()
+        self._per_user: dict[int, int] = defaultdict(int)
+
+    # --- introspection ------------------------------------------------------
+    @property
+    def pending(self) -> int:
+        return self._queue.qsize()
+
+    @property
+    def active(self) -> int:
+        return self._active
+
+    def snapshot(self) -> QueueSnapshot:
+        return QueueSnapshot(active=self._active, pending=self.pending)
+
+    def load(self, user_id: int) -> int:
+        return self._per_user.get(user_id, 0)
+
+    def is_running(self, key: int) -> bool:
+        return key in self._tasks
+
+    # --- producer -----------------------------------------------------------
+    async def submit(
+        self,
+        func: Job,
+        *args,
+        key: Optional[int] = None,
+        user_id: Optional[int] = None,
+        **kwargs,
+    ) -> int:
+        """Enqueue a coroutine function; returns its queue position (0 = next)."""
+        if user_id is not None and self.load(user_id) >= self.per_user_limit:
+            raise QueueSaturated
+
+        try:
+            self._queue.put_nowait(
+                _Item(func=func, args=args, kwargs=kwargs, key=key, user_id=user_id)
+            )
+        except asyncio.QueueFull as exc:
+            raise QueueSaturated from exc
+
+        if user_id is not None:
+            self._per_user[user_id] += 1
+        logger.info("Queued job (waiting=%s active=%s user=%s)", self.pending, self._active, user_id)
+        return max(self.pending - 1, 0)
+
+    def cancel(self, key: int) -> bool:
+        """Cancel a queued or running job. Safe to call more than once."""
+        self._cancelled.add(key)
+        task = self._tasks.get(key)
+        if task is not None and not task.done():
+            task.cancel()
+            logger.info("Cancelled running job %s", key)
+            return True
+        queued = any(item.key == key for item in list(self._queue._queue))  # type: ignore[attr-defined]
+        if queued:
+            logger.info("Marked queued job %s as cancelled", key)
+            return True
+        return False
+
+    # --- consumer -----------------------------------------------------------
+    async def _worker(self, index: int) -> None:
+        while self._running:
+            item = await self._queue.get()
+            self._active += 1
+            task: Optional[asyncio.Task] = None
+            skipped = item.key is not None and item.key in self._cancelled
+            try:
+                if skipped:
+                    logger.info("Skipping job %s: cancelled while queued", item.key)
+                    continue
+                task = asyncio.create_task(item.func(*item.args, **item.kwargs))
+                if item.key is not None:
+                    self._tasks[item.key] = task
+                await asyncio.wait_for(task, timeout=self.task_timeout)
+            except asyncio.CancelledError:
+                if self._running and item.key is not None and item.key in self._cancelled:
+                    logger.info("Job %s cancelled by user", item.key)
+                else:
+                    raise
+            except asyncio.TimeoutError:
+                logger.error("Job %s timed out after %ss", index, self.task_timeout)
+            except Exception as exc:  # noqa: BLE001 - one bad job must not kill a worker
+                logger.exception("Worker %s job failed: %s", index, exc)
+            finally:
+                if item.key is not None:
+                    self._tasks.pop(item.key, None)
+                    self._cancelled.discard(item.key)
+                if item.user_id is not None:
+                    self._per_user[item.user_id] = max(0, self._per_user[item.user_id] - 1)
+                    if not self._per_user[item.user_id]:
+                        self._per_user.pop(item.user_id, None)
+                self._active = max(0, self._active - 1)
+                self._queue.task_done()
+
+    # --- lifecycle ----------------------------------------------------------
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        for index in range(self.concurrency):
+            self._workers.append(asyncio.create_task(self._worker(index), name=f"worker-{index}"))
+        logger.info("Started %s download worker(s)", self.concurrency)
+
+    async def stop(self) -> None:
+        self._running = False
+        for worker in self._workers:
+            worker.cancel()
+        await asyncio.gather(*self._workers, return_exceptions=True)
+        self._workers.clear()
+        logger.info("Stopped download workers")
+
+    async def drain(self, timeout: float = 20.0) -> None:
+        try:
+            await asyncio.wait_for(self._queue.join(), timeout=timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass

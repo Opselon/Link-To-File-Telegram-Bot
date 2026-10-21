@@ -14,7 +14,7 @@ from urllib.parse import unquote, urlparse
 
 import aiohttp
 
-from config import (
+from linktofile.config import (
     CHUNK_SIZE,
     DOWNLOAD_TIMEOUT,
     DOWNLOADS_DIR,
@@ -26,7 +26,7 @@ from config import (
     YTDLP_FRAGMENTS,
     YTDLP_PROXY,
 )
-from utils import clean_filename, format_size, strip_ansi
+from linktofile.shared.utils import clean_filename, format_size, strip_ansi
 
 logger = logging.getLogger(__name__)
 

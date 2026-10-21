@@ -11,7 +11,7 @@ import aiofiles
 from aiogram.client.bot import Bot
 from aiogram.types import FSInputFile
 
-from config import UPLOAD_CHUNK_SIZE
+from linktofile.config import UPLOAD_CHUNK_SIZE
 
 
 class ProgressFSInputFile(FSInputFile):

@@ -1,4 +1,4 @@
-"""Entry point: environment checks, logging, signal handling, polling."""
+"""Link → File entry point: CLI flags, logging, lifecycle, polling."""
 
 from __future__ import annotations
 
@@ -6,27 +6,28 @@ import argparse
 import asyncio
 import logging
 import shutil
-import signal
 import sys
 from logging.handlers import RotatingFileHandler
 
-from config import (
+from linktofile.config import (
     BOT_TOKEN,
     DATA_DIR,
     DOWNLOADS_DIR,
+    HEARTBEAT_FILE,
     LOG_LEVEL,
-    MAX_FILE_SIZE_MB,
     QUEUE_CONCURRENCY,
     TELEGRAM_API_URL,
+    UPLOAD_LIMIT_MB,
 )
-from core.version import VERSION
+from linktofile.infrastructure.system.version import VERSION
 
 logger = logging.getLogger("linktofile")
 
 
-def setup_logging() -> None:
-    level = getattr(logging, LOG_LEVEL, logging.INFO)
-    formatter = logging.Formatter("%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
+def setup_logging(level: str | None = None) -> None:
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s", datefmt="%H:%M:%S"
+    )
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
     try:
         handlers.append(
@@ -36,14 +37,19 @@ def setup_logging() -> None:
         )
     except OSError:
         pass
-    logging.basicConfig(level=level, handlers=handlers, force=True)
+    logging.basicConfig(
+        level=getattr(logging, (level or LOG_LEVEL).upper(), logging.INFO),
+        handlers=handlers,
+        force=True,
+    )
     for handler in handlers:
         handler.setFormatter(formatter)
-    logging.getLogger("aiogram.event").setLevel(logging.WARNING)
+    for noisy in ("aiogram.event", "aiohttp.access"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def cleanup_downloads() -> None:
-    """Remove leftover files from a previous run (a crash leaves them behind)."""
+    """A crash can leave temp files behind; clear them on boot."""
     if not DOWNLOADS_DIR.exists():
         return
     removed = 0
@@ -62,7 +68,9 @@ def cleanup_downloads() -> None:
 
 def print_banner() -> None:
     logger.info("⚡ Link → File v%s", VERSION)
-    logger.info("   data=%s · workers=%s · max=%sMB", DATA_DIR, QUEUE_CONCURRENCY, MAX_FILE_SIZE_MB)
+    logger.info(
+        "   data=%s · workers=%s · cap=%sMB", DATA_DIR, QUEUE_CONCURRENCY, UPLOAD_LIMIT_MB
+    )
     if TELEGRAM_API_URL:
         logger.info("   Bot API: %s", TELEGRAM_API_URL)
     if not shutil.which("ffmpeg"):
@@ -71,8 +79,6 @@ def print_banner() -> None:
 
 async def heartbeat(stop: asyncio.Event) -> None:
     """Touch a file so container health checks can see the loop is alive."""
-    from config import HEARTBEAT_FILE
-
     while not stop.is_set():
         try:
             HEARTBEAT_FILE.write_text(str(int(asyncio.get_running_loop().time())))
@@ -85,40 +91,21 @@ async def heartbeat(stop: asyncio.Event) -> None:
 
 
 async def run_bot() -> None:
-    from bot import dp, start_bot
+    from linktofile.bootstrap import build_application
 
-    loop = asyncio.get_running_loop()
-    stop_event = asyncio.Event()
+    app = build_application()
     beat_stop = asyncio.Event()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, stop_event.set)
-        except NotImplementedError:  # pragma: no cover - Windows
-            pass
-
-    polling = asyncio.create_task(start_bot())
     beat = asyncio.create_task(heartbeat(beat_stop))
-    stop_task = asyncio.create_task(stop_event.wait())
-
-    await asyncio.wait({polling, stop_task}, return_when=asyncio.FIRST_COMPLETED)
-    stop_task.cancel()
-    if stop_event.is_set():
-        logger.info("Stop requested, closing polling…")
-        try:
-            await dp.stop_polling()
-        except Exception:  # noqa: BLE001 - already stopping
-            pass
     try:
-        await asyncio.wait_for(polling, timeout=30)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        polling.cancel()
-    beat_stop.set()
-    await asyncio.gather(beat, return_exceptions=True)
-
-
-async def stop_event_wait(event: asyncio.Event) -> None:
-    await event.wait()
+        await app.dispatcher.start_polling(
+            app.bot,
+            allowed_updates=app.dispatcher.resolve_used_update_types(),
+            handle_signals=True,
+        )
+    finally:
+        beat_stop.set()
+        await asyncio.gather(beat, return_exceptions=True)
+        await app.close()
 
 
 async def check_environment() -> int:
@@ -147,7 +134,7 @@ async def check_environment() -> int:
     if shutil.which("ffmpeg"):
         print("✔ ffmpeg found")
     else:
-        print("⚠ ffmpeg missing — media merging will fail (apt install ffmpeg)")
+        print("⚠ ffmpeg missing — media merging will fail (apk add ffmpeg)")
     try:
         probe = DATA_DIR / ".write-test"
         probe.write_text("ok")
@@ -156,13 +143,23 @@ async def check_environment() -> int:
     except OSError as exc:
         print(f"✖ {DATA_DIR} is not writable: {exc}")
         ok = False
+
+    from linktofile.infrastructure.persistence.sqlite import Database
+
+    try:
+        Database()
+        print("✔ Database reachable")
+    except Exception as exc:  # noqa: BLE001
+        print(f"✖ Database error: {exc}")
+        ok = False
+
+    print(f"✔ Delivery cap: {UPLOAD_LIMIT_MB} MB · version {VERSION}")
     return 0 if ok else 1
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="linktofile",
-        description="Link → File: a fast Telegram downloader bot.",
+        prog="linktofile", description="Link → File: a fast Telegram downloader bot."
     )
     parser.add_argument("--setup", action="store_true", help="run the configuration wizard")
     parser.add_argument("--check", action="store_true", help="validate token, ffmpeg and storage")
@@ -175,7 +172,7 @@ def main() -> None:
         return
 
     if args.update:
-        from core.updater import update_system
+        from linktofile.infrastructure.system.updater import update_system
 
         update_system()
         return
@@ -187,7 +184,7 @@ def main() -> None:
 
     if args.setup or not BOT_TOKEN:
         if args.setup or sys.stdin.isatty():
-            from cli.wizard import run_wizard
+            from linktofile.cli.wizard import run_wizard
 
             try:
                 run_wizard()
@@ -203,7 +200,8 @@ def main() -> None:
                 "  • run: python main.py --setup\n"
                 "  • or put BOT_TOKEN=123:ABC… in a .env file next to main.py\n"
                 "  • or run the Docker installer: curl -fsSL "
-                "https://raw.githubusercontent.com/Opselon/Link-To-File-Telegram-Bot/main/install.sh | bash"
+                "https://raw.githubusercontent.com/Opselon/Link-To-File-Telegram-Bot/main/install.sh "
+                "| bash"
             )
             sys.exit(2)
 
