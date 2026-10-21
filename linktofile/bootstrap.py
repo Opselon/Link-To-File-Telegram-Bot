@@ -82,9 +82,9 @@ def build_application() -> Application:
 
     engine = EngineDownloadAdapter(policy)
     workflow = DownloadWorkflow(
-        engine,
-        tickets,
-        policy,
+        engine=engine,
+        tickets=tickets,
+        policy=policy,
         temp_dir=DOWNLOADS_DIR,
         min_free_mb=MIN_FREE_DISK_MB,
     )
