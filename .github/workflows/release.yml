@@ -111,13 +111,18 @@ jobs:
           cache-to: type=gha,mode=max
 
   release:
-    needs: [prepare, test]
+    needs: [prepare, test, image]
     if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Create tag (main only) and source archives
         env:
