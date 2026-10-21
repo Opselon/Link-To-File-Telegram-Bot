@@ -78,6 +78,10 @@ PROGRESS_INTERVAL = float(_int("PROGRESS_INTERVAL_MS", 1500, minimum=300, maximu
 YTDLP_FRAGMENTS = _int("YTDLP_FRAGMENTS", 8, minimum=1, maximum=32)
 HTTP_POOL_SIZE = _int("HTTP_POOL_SIZE", 64, minimum=4, maximum=256)
 
+# How long a media page may take to describe itself before the bot shows the
+# plain quality picker instead. 0 disables the preview card entirely.
+PREVIEW_TIMEOUT = _int("PREVIEW_TIMEOUT", 12, minimum=0, maximum=60)
+
 LOG_LEVEL = _text("LOG_LEVEL", "INFO").upper()
 
 # Optional egress settings (needed where YouTube or a file host is blocked).

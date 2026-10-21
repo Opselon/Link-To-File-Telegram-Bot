@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 COMMANDS = [
     BotCommand(command="start", description="Main menu"),
     BotCommand(command="help", description="How it works"),
+    BotCommand(command="history", description="Your recent downloads"),
     BotCommand(command="stats", description="Your numbers"),
     BotCommand(command="cancel", description="Stop my downloads"),
     BotCommand(command="id", description="Show my Telegram ID"),
@@ -56,6 +57,12 @@ async def on_startup(services: Services, bot: Bot) -> None:
             name="janitor",
         )
     )
+
+    # A restart strands whatever the last process had in flight: the queue is
+    # in memory, so those tickets would stay "downloading" forever.
+    reaped = services.tickets.reap_stale()
+    if reaped:
+        logger.info("Reaped %s stale ticket(s) from the previous run", reaped)
 
     try:
         await bot.set_my_commands(COMMANDS)

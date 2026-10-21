@@ -13,6 +13,8 @@ from aiogram.enums import ParseMode
 from linktofile.application.container import Services
 from linktofile.application.active import ActiveJobs
 from linktofile.application.downloads import DownloadWorkflow
+from linktofile.application.preferences import UserPreferences
+from linktofile.application.preview import PreviewService
 from linktofile.application.queue import DownloadQueue
 from linktofile.application.ratelimit import RateLimiter
 from linktofile.application.settings import AccessGuard, SettingsService
@@ -22,6 +24,7 @@ from linktofile.config import (
     DOWNLOADS_DIR,
     MAX_PENDING_PER_USER,
     MIN_FREE_DISK_MB,
+    PREVIEW_TIMEOUT,
     QUEUE_CONCURRENCY,
     QUEUE_MAX_SIZE,
     QUEUE_TASK_TIMEOUT,
@@ -33,6 +36,7 @@ from linktofile.config import (
 )
 from linktofile.domain.policies import FormatPolicy
 from linktofile.infrastructure.download.adapter import EngineDownloadAdapter
+from linktofile.infrastructure.download.preview import YtDlpProbe
 from linktofile.infrastructure.membership import TelegramMembership
 from linktofile.infrastructure.persistence.sqlite import (
     Database,
@@ -109,10 +113,18 @@ def build_application() -> Application:
         policy=policy,
         limiter=RateLimiter(RATE_LIMIT_SECONDS),
         active=ActiveJobs(),
+        preview=PreviewService(YtDlpProbe(), timeout=PREVIEW_TIMEOUT),
+        prefs=UserPreferences(settings_repo),
         cap_mb=UPLOAD_LIMIT_MB,
         admin_id=ADMIN_ID,
         version=VERSION,
     )
 
-    logger.info("Wired: db=%s cap=%sMB workers=%s", DB_PATH, UPLOAD_LIMIT_MB, QUEUE_CONCURRENCY)
+    logger.info(
+        "Wired: db=%s cap=%sMB workers=%s preview=%ss",
+        DB_PATH,
+        UPLOAD_LIMIT_MB,
+        QUEUE_CONCURRENCY,
+        PREVIEW_TIMEOUT,
+    )
     return Application(bot=bot, dispatcher=build_dispatcher(services), services=services)

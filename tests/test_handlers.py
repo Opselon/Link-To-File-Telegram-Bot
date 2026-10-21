@@ -8,9 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 from linktofile.application.active import ActiveJobs
+from linktofile.application.preferences import UserPreferences
 from linktofile.application.queue import DownloadQueue
 from linktofile.application.ratelimit import RateLimiter
 from linktofile.application.settings import SettingsService
+from linktofile.domain.models import MediaInfo, Quality
 from linktofile.domain.policies import FormatPolicy
 from linktofile.infrastructure.persistence.sqlite import (
     SqliteSettings,
@@ -19,7 +21,7 @@ from linktofile.infrastructure.persistence.sqlite import (
     SqliteUsers,
 )
 from linktofile.infrastructure.telegram import handlers, texts
-from linktofile.infrastructure.telegram.callbacks import TicketCB
+from linktofile.infrastructure.telegram.callbacks import QualityCB, TicketCB
 
 USER = SimpleNamespace(id=7, first_name="Ada", is_bot=False)
 
@@ -31,14 +33,31 @@ class FakeMessage:
         self.from_user = USER
         self.answers: list[str] = []
         self.edits: list[str] = []
+        self.captions: list[str] = []
+        self.photos: list[str] = []
+        self.photo = None
+        self.markups: list = []
         self.deleted = False
 
     async def answer(self, text, **kwargs):
         self.answers.append(text)
+        self.markups.append(kwargs.get("reply_markup"))
+        return self
+
+    async def answer_photo(self, photo, **kwargs):
+        self.photos.append(str(photo))
+        self.answers.append(kwargs.get("caption") or "")
+        self.markups.append(kwargs.get("reply_markup"))
         return self
 
     async def edit_text(self, text, **kwargs):
         self.edits.append(text)
+        self.markups.append(kwargs.get("reply_markup"))
+        return self
+
+    async def edit_caption(self, caption=None, **kwargs):
+        self.captions.append(caption or "")
+        self.markups.append(kwargs.get("reply_markup"))
         return self
 
     async def delete(self):
@@ -85,6 +104,18 @@ class FakeMembership:
         return None
 
 
+class StubPreview:
+    """No network in tests: the preview service returns whatever we hand it."""
+
+    def __init__(self, info=None) -> None:
+        self.info = info
+        self.calls: list[str] = []
+
+    async def describe(self, url: str):
+        self.calls.append(url)
+        return self.info
+
+
 @pytest.fixture
 def services(database):
     settings_repo = SqliteSettings(database)
@@ -108,9 +139,11 @@ def services(database):
         policy=FormatPolicy(cap_bytes=1024 * 1024),
         limiter=RateLimiter(0),
         active=ActiveJobs(),
+        prefs=UserPreferences(settings_repo),
+        preview=StubPreview(),
         cap_mb=50,
         admin_id=1,
-        version="3.0.0",
+        version="3.1.0",
         is_admin=lambda user_id: user_id == 1,
     )
 
@@ -195,3 +228,137 @@ async def test_cancel_for_someone_elses_ticket_is_refused(services):
 
     assert callback.alerts == [texts.missing_download_text()]
     assert message.edits == []
+
+
+# --- v3.1: smart preview + remembered quality -------------------------------
+INFO = MediaInfo(
+    title="Ada talk",
+    uploader="Ada",
+    duration=95,
+    thumbnail="https://cdn.example/t.jpg",
+    site="youtube.com",
+)
+
+
+async def test_a_media_link_shows_a_rich_preview_card(services):
+    services.preview = StubPreview(INFO)
+    message = FakeMessage("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+
+    await handlers.on_text(message, services)
+
+    assert message.photos == ["https://cdn.example/t.jpg"]
+    assert "Ada talk" in message.answers[0]
+    assert "Pick a quality" in message.answers[0]
+    assert services.workflow.calls == []  # nothing downloads before a choice
+    assert services.tickets.recent(USER.id)[0].url.endswith("dQw4w9WgXcQ")
+
+
+async def test_a_failed_preview_falls_back_to_the_plain_picker(services):
+    services.preview = StubPreview(None)
+    message = FakeMessage("https://youtu.be/dQw4w9WgXcQ")
+
+    await handlers.on_text(message, services)
+
+    assert message.photos == []
+    assert "Pick a quality" in message.answers[0]
+    assert message.markups[-1] is not None
+
+
+async def test_direct_file_links_are_never_probed(services):
+    services.queue.start()
+    message = FakeMessage("https://cdn.example/song.mp3")
+
+    await handlers.on_text(message, services)
+
+    assert services.preview.calls == []
+    await services.queue.drain(timeout=5)
+    await services.queue.stop()
+
+
+async def test_the_remembered_quality_tops_the_picker(services):
+    services.prefs.set(USER.id, Quality.video(720))
+    message = FakeMessage("https://youtu.be/dQw4w9WgXcQ")
+
+    await handlers.on_text(message, services)
+
+    first_row = message.markups[-1].inline_keyboard[0]
+    payloads = [QualityCB.unpack(button.callback_data) for button in first_row]
+    assert payloads[0].kind == "video" and payloads[0].value == "720"
+    assert payloads[1].kind == "forget"
+
+
+async def test_forget_clears_the_remembered_quality(services):
+    services.prefs.set(USER.id, Quality.audio(192))
+    ticket = services.tickets.create(USER.id, "https://youtu.be/dQw4w9WgXcQ")
+    message = FakeMessage()
+    callback = FakeCallback(message)
+
+    await handlers.on_quality(
+        callback, QualityCB(kind="forget", value="-", ticket=ticket.id), services
+    )
+
+    assert services.prefs.get(USER.id) is None
+    assert callback.alerts == ["Preference cleared ↺"]
+
+
+async def test_picking_a_quality_is_remembered(services):
+    services.queue.start()
+    ticket = services.tickets.create(USER.id, "https://youtu.be/dQw4w9WgXcQ")
+    callback = FakeCallback(FakeMessage())
+
+    await handlers.on_quality(
+        callback, QualityCB(kind="video", value="480", ticket=ticket.id), services
+    )
+
+    assert services.prefs.get(USER.id) == Quality.video(480)
+    await services.queue.drain(timeout=5)
+    await services.queue.stop()
+
+
+def test_plain_text_is_closed_while_an_admin_flow_is_open():
+    """A link must not be swallowed by waiting_channel / waiting_broadcast."""
+    from aiogram.filters import StateFilter
+
+    handler = next(
+        item
+        for item in handlers.router.message.handlers
+        if getattr(item.callback, "__name__", "") == "on_text"
+    )
+    states = [f.callback for f in handler.filters if isinstance(f.callback, StateFilter)]
+
+    assert states, "on_text must carry a StateFilter"
+    assert states[0].states == (None,)
+
+
+async def test_reset_edits_the_caption_of_a_photo_card(services):
+    """The picker sits on a photo card: text edits fail there, captions work."""
+    services.prefs.set(USER.id, Quality.video(720))
+    ticket = services.tickets.create(USER.id, "https://youtu.be/dQw4w9WgXcQ")
+    message = FakeMessage()
+    message.photo = [object()]
+    callback = FakeCallback(message)
+
+    await handlers.on_quality(
+        callback, QualityCB(kind="forget", value="-", ticket=ticket.id), services
+    )
+
+    assert services.prefs.get(USER.id) is None
+    assert message.captions == ["🎚 <b>Pick a quality</b>"]
+    assert message.edits == []
+
+
+def test_previews_can_be_switched_off_with_zero_timeout():
+    import asyncio
+
+    from linktofile.application.preview import PreviewService
+
+    class Probe:
+        calls = 0
+
+        async def probe(self, url):
+            Probe.calls += 1
+            return INFO
+
+    service = PreviewService(Probe(), timeout=0)
+    assert asyncio.run(service.describe("https://youtu.be/x")) is None
+    assert Probe.calls == 0

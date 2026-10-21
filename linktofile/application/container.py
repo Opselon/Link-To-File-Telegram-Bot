@@ -13,6 +13,8 @@ from aiogram import Bot
 
 from linktofile.application.active import ActiveJobs
 from linktofile.application.downloads import DownloadWorkflow
+from linktofile.application.preferences import UserPreferences
+from linktofile.application.preview import PreviewService
 from linktofile.application.queue import DownloadQueue
 from linktofile.application.ratelimit import RateLimiter
 from linktofile.application.settings import AccessGuard, SettingsService
@@ -41,6 +43,8 @@ class Services:
     policy: FormatPolicy
     limiter: RateLimiter
     active: ActiveJobs
+    preview: PreviewService
+    prefs: UserPreferences
     cap_mb: int
     admin_id: Optional[int] = None
     version: str = ""

@@ -57,6 +57,15 @@ Docker: [get.docker.com](https://get.docker.com) · ffmpeg: `sudo apt install ff
 | 🔁 **Recovery** | Retry / change quality / download again right on the result card |
 | 🛡 **Safety** | SSRF guard, per-user rate limit, hard size caps, temporary files deleted after upload |
 
+### What's new in v3.1 — smart preview & history
+
+- **Smart media preview.** Send a YouTube/Instagram/TikTok link and the bot now shows the title, uploader, duration and thumbnail in a photo card *before* the quality picker — one `extract_info` pass, cached per URL, with a hard deadline (`PREVIEW_TIMEOUT`, 0 disables it). A slow or unsupported site quietly degrades to the plain picker, so nothing ever gets slower.
+- **Remembered quality.** The quality you pick is stored per user; next time you send a media link the picker opens with **⚡ My usual · 720p** on top. One tap to use it, **↺ Reset** to forget.
+- **Download history.** `/history` (and a **🕘 History** button on the main menu) lists your last 8 downloads with status and size; tap any row to fetch it again.
+- **Admin broadcast.** `/admin` → **📣 Broadcast** → send a message → see exactly what users will get → confirm. The fan-out respects flood control, skips blocked/deleted chats, and reports back with a delivered/failed summary.
+- **Crash recovery.** The queue lives in memory, so a restart used to strand tickets in *downloading* forever. Startup now marks every non-terminal ticket as failed, so stats and history stay honest.
+- **Admin flow isolation fix.** A link sent while the admin channel/broadcast flow was open used to be swallowed by the menu handler. The plain-text handler is now state-filtered, so an open admin form never eats a link (or vice versa).
+
 ### What's new in v3 — clean architecture
 
 v3 is a full rewrite of the internals with the same UX, plus the features below.
@@ -76,18 +85,23 @@ v3 is a full rewrite of the internals with the same UX, plus the features below.
 |---|---|
 | `/start` | Main menu |
 | `/help` | How it works |
+| `/history` | Your recent downloads (replay in one tap) |
 | `/stats` | Your download stats |
 | `/cancel` | Stop your running downloads |
 | `/id` | Your Telegram ID / chat ID |
 | `/version` | Bot version + latest release link |
 
-Admins (`ADMIN_ID`) get **🛠 Admin dashboard** (`/admin`): users, downloads today, queue load, disk space, plus the force-join controls.
+Admins (`ADMIN_ID`) get **🛠 Admin dashboard** (`/admin`): users, downloads today, queue load, disk space, plus the force-join controls and **📣 Broadcast**.
 
 ### Force join
 
 `/admin` → **📢 Channel** → send `@yourchannel` (the bot must be an admin there) → toggle **🔒 Force join: ON**.
 
 From then on, links and quality picks are refused until the user joins; the bot shows a **Join channel** button and an **I joined** check. Everything is stored in SQLite, so it survives restarts and updates — no env change needed.
+
+### Broadcast
+
+`/admin` → **📣 Broadcast** → send the message (HTML allowed). The bot echoes it back as a preview, shows the recipient count, and only sends after **📣 Send to everyone**. The fan-out runs in the background at ~20 messages/s, retries on flood control, skips users who blocked the bot, and finishes with a delivered/failed summary.
 
 ---
 
@@ -104,6 +118,7 @@ All settings are environment variables (`.env` is read automatically). Only the 
 | `QUEUE_CONCURRENCY` | `3` | Parallel downloads (1–16) |
 | `QUEUE_MAX_SIZE` | `200` | Waiting jobs before the bot says "busy" |
 | `RATE_LIMIT_SECONDS` | `3` | Per-user cooldown |
+| `PREVIEW_TIMEOUT` | `12` | Seconds a media page may take to describe itself; `0` disables the preview card |
 | `DOWNLOAD_CHUNK_KB` | `256` | Streaming chunk size |
 | `UPLOAD_CHUNK_KB` | `1024` | Upload chunk size |
 | `YTDLP_FRAGMENTS` | `8` | Concurrent media fragments |

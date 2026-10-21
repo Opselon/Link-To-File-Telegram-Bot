@@ -2,7 +2,7 @@
 
 import pytest
 
-from linktofile.domain.models import ForceJoinPolicy, MediaAsset
+from linktofile.domain.models import DownloadTicket, ForceJoinPolicy, MediaAsset, Quality
 from linktofile.infrastructure.telegram import keyboards, texts
 from linktofile.infrastructure.telegram.callbacks import Nav, QualityCB, TicketCB
 from linktofile.shared.utils import is_media_url, is_safe_url, is_valid_url
@@ -20,12 +20,20 @@ def has_way_back(markup) -> bool:
     )
 
 
+HISTORY = [
+    DownloadTicket(id=1, user_id=7, url="https://example.com/a.zip", filename="a.zip"),
+    DownloadTicket(id=2, user_id=7, url="https://example.com/b.mp4"),
+]
+
+
 @pytest.mark.parametrize(
     "markup",
     [
         keyboards.main_menu(),
         keyboards.main_menu(is_admin=True),
         keyboards.quality_menu(1),
+        keyboards.quality_menu(1, default=Quality.video(720)),
+        keyboards.quality_menu(1, default=Quality.audio(192)),
         keyboards.progress_menu(1),
         keyboards.result_menu(1),
         keyboards.result_menu(1, media=True),
@@ -34,6 +42,9 @@ def has_way_back(markup) -> bool:
         keyboards.help_menu(),
         keyboards.sites_menu(),
         keyboards.stats_menu(),
+        keyboards.history_menu(HISTORY),
+        keyboards.history_menu([]),
+        keyboards.broadcast_confirm_menu(),
         keyboards.admin_menu(ForceJoinPolicy()),
         keyboards.join_menu(ForceJoinPolicy(channel="@x", invite_url="https://t.me/x")),
         keyboards.channel_set_menu(),
@@ -136,3 +147,64 @@ def test_join_menu_links_to_the_channel():
     )
     urls = [b.url for b in buttons(markup) if b.url]
     assert urls == ["https://t.me/c"]
+
+
+def test_the_quality_menu_offers_the_usual_choice_first():
+    markup = keyboards.quality_menu(9, default=Quality.video(720))
+    payloads = [
+        QualityCB.unpack(button.callback_data)
+        for button in buttons(markup)
+        if (button.callback_data or "").startswith("q:")
+    ]
+    assert payloads[0] == QualityCB(kind="video", value="720", ticket=9)
+    assert any(p.kind == "forget" for p in payloads)
+
+
+def test_audio_defaults_keep_their_bitrate():
+    markup = keyboards.quality_menu(4, default=Quality.audio(192))
+    first = QualityCB.unpack(markup.inline_keyboard[0][0].callback_data)
+    assert (first.kind, first.value) == ("audio", "192")
+
+
+def test_history_rows_replay_their_own_ticket():
+    markup = keyboards.history_menu(HISTORY)
+    payloads = [
+        TicketCB.unpack(button.callback_data)
+        for button in buttons(markup)
+        if (button.callback_data or "").startswith("t:")
+    ]
+    assert [p.ticket for p in payloads] == [1, 2]
+    assert {p.action for p in payloads} == {"again"}
+
+
+def test_preview_caption_renders_meta_and_escapes():
+    from linktofile.domain.models import MediaInfo
+
+    caption = texts.preview_caption(
+        MediaInfo(
+            title="<b>hi</b>",
+            uploader="Ada & Co",
+            duration=3700,
+            view_count=1234567,
+        )
+    )
+    assert "&lt;b&gt;hi&lt;/b&gt;" in caption
+    assert "Ada &amp; Co" in caption
+    assert "1:01:40" in caption
+    assert "1,234,567" in caption
+    assert "Pick a quality" in caption
+
+
+def test_history_text_lists_each_download_with_its_status():
+    from linktofile.domain.models import DownloadStatus
+
+    items = [
+        DownloadTicket(id=1, user_id=7, url="https://example.com/a.zip",
+                       status=DownloadStatus.COMPLETED, filename="a.zip", size=2048),
+        DownloadTicket(id=2, user_id=7, url="https://example.com/b.mp4",
+                       status=DownloadStatus.FAILED),
+    ]
+    rendered = texts.history_text(items)
+    assert "a.zip · 2.0 KB" in rendered
+    assert "✅" in rendered and "⚠️" in rendered
+    assert "Nothing here yet" in texts.history_text([])

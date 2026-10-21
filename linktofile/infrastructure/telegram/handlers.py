@@ -2,20 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import shutil
 from typing import Optional
 
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from linktofile.application.container import Services
 from linktofile.application.downloads import DownloadJob
 from linktofile.domain.errors import QueueSaturated
-from linktofile.domain.models import DownloadTicket, Quality, QualityKind
+from linktofile.domain.models import DownloadTicket, MediaInfo, Quality, QualityKind
+from linktofile.infrastructure.download.engine import is_media_site
 from linktofile.infrastructure.telegram import keyboards, texts
 from linktofile.infrastructure.telegram.callbacks import (
     AdminCB,
@@ -30,6 +33,9 @@ from linktofile.shared.utils import is_media_url, is_safe_url, is_valid_url
 
 logger = logging.getLogger(__name__)
 router = Router(name="core")
+
+# Pause between broadcast sends: ~20 messages/s stays under Telegram's 30/s cap.
+_BROADCAST_SPACING = 0.05
 
 
 # --- helpers ----------------------------------------------------------------
@@ -86,6 +92,29 @@ async def _enforce_gate(message: Message, services: Services) -> bool:
         return False
     await _join_wall(message, services)
     return True
+
+
+async def _show_quality_card(
+    message: Message,
+    ticket: DownloadTicket,
+    *,
+    default: Optional[Quality],
+    info: Optional[MediaInfo],
+) -> None:
+    """Preview card when metadata is available, the plain picker otherwise."""
+    caption = texts.preview_caption(info) if info is not None else "🎚 <b>Pick a quality</b>"
+    markup = keyboards.quality_menu(ticket.id, default=default)
+    if info is not None and info.has_thumbnail:
+        try:
+            await message.answer_photo(
+                info.thumbnail, caption=caption, parse_mode="HTML", reply_markup=markup
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 - a bad thumbnail is never fatal
+            logger.debug("Preview photo failed for ticket %s: %s", ticket.id, exc)
+    await message.answer(
+        caption, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True
+    )
 
 
 async def _enqueue(
@@ -157,6 +186,19 @@ async def cmd_stats(message: Message, services: Services) -> None:
     )
 
 
+@router.message(Command("history"))
+async def cmd_history(message: Message, services: Services) -> None:
+    if await _enforce_gate(message, services):
+        return
+    items = services.tickets.recent(message.from_user.id, limit=8)
+    await message.answer(
+        texts.history_text(items),
+        parse_mode="HTML",
+        reply_markup=keyboards.history_menu(items),
+        disable_web_page_preview=True,
+    )
+
+
 @router.message(Command("id"))
 async def cmd_id(message: Message) -> None:
     await message.answer(f"🆔 <code>{message.from_user.id}</code>", parse_mode="HTML")
@@ -182,7 +224,9 @@ async def cmd_cancel(message: Message, services: Services) -> None:
 
 
 # --- links ------------------------------------------------------------------
-@router.message(F.text)
+# StateFilter(None): a plain link must never be swallowed by an open admin flow
+# (channel input, broadcast draft). FSM handlers match their state first.
+@router.message(StateFilter(None), F.text)
 async def on_text(message: Message, services: Services) -> None:
     text = (message.text or "").strip()
     user_id = message.from_user.id
@@ -210,11 +254,9 @@ async def on_text(message: Message, services: Services) -> None:
     ticket = services.tickets.create(user_id, url)
 
     if is_media_url(url):
-        await message.answer(
-            "🎚 <b>Pick a quality</b>",
-            parse_mode="HTML",
-            reply_markup=keyboards.quality_menu(ticket.id),
-        )
+        default = services.prefs.get(user_id)
+        info = await services.preview.describe(url) if is_media_site(url) else None
+        await _show_quality_card(message, ticket, default=default, info=info)
         return
 
     await _enqueue(services, ticket, Quality.video(None), message, media=False)
@@ -225,6 +267,30 @@ async def on_text(message: Message, services: Services) -> None:
 async def on_quality(
     callback: CallbackQuery, callback_data: QualityCB, services: Services
 ) -> None:
+    if callback_data.kind == "forget":
+        services.prefs.clear(callback.from_user.id)
+        if callback.message is not None:
+            markup = keyboards.quality_menu(callback_data.ticket)
+            # The picker may live on a photo card: editing "text" there fails
+            # on Telegram, so the caption is the thing to rewrite.
+            try:
+                if getattr(callback.message, "photo", None):
+                    await callback.message.edit_caption(
+                        caption="🎚 <b>Pick a quality</b>",
+                        parse_mode="HTML",
+                        reply_markup=markup,
+                    )
+                else:
+                    await callback.message.edit_text(
+                        "🎚 <b>Pick a quality</b>",
+                        parse_mode="HTML",
+                        reply_markup=markup,
+                    )
+            except TelegramBadRequest as exc:
+                logger.debug("Could not refresh the picker after reset: %s", exc)
+        await callback.answer("Preference cleared ↺")
+        return
+
     quality = _quality(callback_data.kind, callback_data.value)
     if quality is None:
         await callback.answer("Bad selection.", show_alert=True)
@@ -243,6 +309,7 @@ async def on_quality(
     media = is_media_url(ticket.url) or quality.kind is QualityKind.AUDIO
     ok = await _enqueue(services, ticket, quality, callback.message, media=media)
     if ok:
+        services.prefs.set(callback.from_user.id, quality)
         await callback.answer("Added to the queue ⚡")
 
 
@@ -280,7 +347,9 @@ async def on_ticket(
         await callback.message.edit_text(
             "🎚 <b>Pick another quality</b>",
             parse_mode="HTML",
-            reply_markup=keyboards.quality_menu(ticket.id),
+            reply_markup=keyboards.quality_menu(
+                ticket.id, default=services.prefs.get(callback.from_user.id)
+            ),
         )
         await callback.answer()
         return
@@ -294,7 +363,9 @@ async def on_ticket(
         await callback.message.edit_text(
             "🎚 <b>Pick a quality</b>",
             parse_mode="HTML",
-            reply_markup=keyboards.quality_menu(fresh.id),
+            reply_markup=keyboards.quality_menu(
+                fresh.id, default=services.prefs.get(callback.from_user.id)
+            ),
         )
         await callback.answer()
         return
@@ -304,7 +375,9 @@ async def on_ticket(
 
 # --- navigation -------------------------------------------------------------
 @router.callback_query(Nav.filter())
-async def on_nav(callback: CallbackQuery, callback_data: Nav, services: Services) -> None:
+async def on_nav(
+    callback: CallbackQuery, callback_data: Nav, services: Services, state: FSMContext
+) -> None:
     if callback.message is None:
         await callback.answer()
         return
@@ -313,6 +386,10 @@ async def on_nav(callback: CallbackQuery, callback_data: Nav, services: Services
         await callback.message.delete()
         await callback.answer()
         return
+
+    # Leaving the screen abandons any half-finished admin flow (channel, broadcast)
+    # so the next plain-text message is never swallowed by a stale state.
+    await state.clear()
 
     if action == "sites":
         text, markup = texts.sites_text(), keyboards.sites_menu()
@@ -323,6 +400,9 @@ async def on_nav(callback: CallbackQuery, callback_data: Nav, services: Services
             texts.stats_text(services.stats.user(callback.from_user.id)),
             keyboards.stats_menu(),
         )
+    elif action == "history":
+        items = services.tickets.recent(callback.from_user.id, limit=8)
+        text, markup = texts.history_text(items), keyboards.history_menu(items)
     else:  # home / back
         text = texts.welcome(
             callback.from_user,
@@ -403,6 +483,30 @@ async def on_admin(
         )
         await callback.answer()
         return
+    elif action == "broadcast":
+        await state.set_state(AdminFlow.waiting_broadcast)
+        await callback.message.edit_text(
+            texts.broadcast_prompt_text(),
+            parse_mode="HTML",
+            reply_markup=keyboards.channel_set_menu(),
+        )
+        await callback.answer()
+        return
+    elif action in {"send", "abort"}:
+        data = await state.get_data()
+        await state.clear()
+        if action == "abort":
+            await callback.answer("Broadcast aborted")
+        else:
+            draft = str(data.get("broadcast") or "").strip()
+            if not draft:
+                await callback.answer(
+                    "Nothing to send — the draft expired. Try again.", show_alert=True
+                )
+            else:
+                asyncio.create_task(_broadcast(services, callback.from_user.id, draft),
+                                    name="broadcast")
+                await callback.answer("Broadcast started 📣")
 
     policy = services.settings.force_join()
     await callback.message.edit_text(
@@ -440,6 +544,74 @@ async def on_channel_input(message: Message, services: Services, state: FSMConte
         parse_mode="HTML",
         reply_markup=keyboards.admin_menu(policy, has_channel=True),
     )
+
+
+@router.message(AdminFlow.waiting_broadcast, F.text)
+async def on_broadcast_input(message: Message, services: Services, state: FSMContext) -> None:
+    """The admin's draft: validate it, show exactly what users will get."""
+    if not services.is_admin(message.from_user.id):
+        await state.clear()
+        return
+    text = (message.text or "").strip()
+    if not text or len(text) > 4000:
+        await message.answer(
+            "⚠️ Broadcast messages must be 1–4000 characters.\nSend the message again.",
+            parse_mode="HTML",
+            reply_markup=keyboards.channel_set_menu(),
+        )
+        return
+
+    try:
+        # This doubles as the HTML check: if it can't render for the admin it
+        # would fail for every user too.
+        await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
+    except TelegramBadRequest as exc:
+        await state.clear()
+        await message.answer(
+            f"⚠️ That message has invalid HTML:\n{html.escape(str(exc)[:200])}"
+        )
+        return
+
+    await state.update_data(broadcast=text)
+    await message.answer(
+        texts.broadcast_confirm_text(services.users.count()),
+        parse_mode="HTML",
+        reply_markup=keyboards.broadcast_confirm_menu(),
+    )
+
+
+async def _broadcast(services: Services, admin_id: int, text: str) -> None:
+    """Fan ``text`` out to every known user; tolerant of limits and dead chats."""
+    recipients = services.users.ids()
+    sent = failed = 0
+    for user_id in recipients:
+        try:
+            await services.bot.send_message(
+                user_id, text, parse_mode="HTML", disable_web_page_preview=True
+            )
+            sent += 1
+        except TelegramRetryAfter as exc:
+            await asyncio.sleep(min(float(getattr(exc, "retry_after", 0)) or 1.0, 5.0))
+            try:
+                await services.bot.send_message(
+                    user_id, text, parse_mode="HTML", disable_web_page_preview=True
+                )
+                sent += 1
+            except Exception:  # noqa: BLE001 - still not deliverable
+                failed += 1
+        except Exception:  # noqa: BLE001 - blocked bot / deleted account: keep going
+            failed += 1
+        await asyncio.sleep(_BROADCAST_SPACING)
+
+    logger.info("Broadcast finished: %s sent, %s failed, %s recipient(s)", sent, failed, len(recipients))
+    try:
+        await services.bot.send_message(
+            admin_id,
+            texts.broadcast_summary_text(len(recipients), sent, failed),
+            parse_mode="HTML",
+        )
+    except Exception:  # noqa: BLE001 - the report must never crash the task
+        logger.warning("Broadcast summary could not be delivered to the admin")
 
 
 # --- join gate --------------------------------------------------------------

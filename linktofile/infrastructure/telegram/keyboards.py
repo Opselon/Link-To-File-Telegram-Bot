@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from linktofile.domain.models import ForceJoinPolicy
+from linktofile.domain.models import DownloadTicket, ForceJoinPolicy, Quality
+from linktofile.infrastructure.telegram import texts
 from linktofile.infrastructure.telegram.callbacks import (
     AdminCB,
     JoinCB,
     Nav,
     QualityCB,
     TicketCB,
-    )
-from linktofile.infrastructure.telegram.texts import RELEASES_URL
+)
 
 try:  # aiogram >= 3.25
     InlineKeyboardButton(text="x", callback_data="x", style="primary")
@@ -56,18 +56,46 @@ def main_menu(*, is_admin: bool = False) -> InlineKeyboardMarkup:
             btn("❓ How it works", callback_data=Nav(action="help").pack()),
         ],
     ]
+    rows.append([btn("🕘 History", callback_data=Nav(action="history").pack())])
     if is_admin:
         rows.append([btn("🛠 Admin dashboard", callback_data=AdminCB(action="menu").pack(),
                          style="success")])
-    rows.append([btn("⭐️ Releases", url=RELEASES_URL, style="primary")])
+    rows.append([btn("⭐️ Releases", url=texts.RELEASES_URL, style="primary")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def quality_menu(ticket: int) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
+def _quality_value(quality: Quality) -> str:
+    if quality.kind.value == "audio":
+        return str(quality.bitrate or 192)
+    return "best" if quality.height is None else str(quality.height)
+
+
+def quality_menu(ticket: int, *, default: Optional[Quality] = None) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if default is not None:
+        # One tap for returning users; "Reset" drops the stored preference.
+        rows.append(
+            [
+                btn(
+                    f"⚡ My usual · {default.label}",
+                    style="success",
+                    callback_data=QualityCB(
+                        kind=default.kind.value,
+                        value=_quality_value(default),
+                        ticket=ticket,
+                    ).pack(),
+                ),
+                btn(
+                    "↺ Reset",
+                    style="danger",
+                    callback_data=QualityCB(kind="forget", value="-", ticket=ticket).pack(),
+                ),
+            ]
+        )
+    rows.append(
         [btn("⚡ Best quality", callback_data=QualityCB(kind="video", value="best",
                                                        ticket=ticket).pack(), style="success")]
-    ]
+    )
     for start in range(0, len(VIDEO_QUALITIES), 3):
         rows.append([
             btn(label, callback_data=QualityCB(kind="video", value=str(height),
@@ -172,9 +200,10 @@ def admin_menu(policy: ForceJoinPolicy, *, has_channel: bool = True) -> InlineKe
             )
         ],
         [
+            btn("📣 Broadcast", callback_data=AdminCB(action="broadcast").pack()),
             btn("🧹 Clear join cache", callback_data=AdminCB(action="cache").pack()),
-            btn("🔄 Refresh", callback_data=AdminCB(action="menu").pack(), style="success"),
         ],
+        [btn("🔄 Refresh", callback_data=AdminCB(action="menu").pack(), style="success")],
         [_back("home")],
     ]
     if not has_channel:
@@ -195,3 +224,31 @@ def join_menu(policy: ForceJoinPolicy, *, invite_url: Optional[str] = None) -> I
 
 def channel_set_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[_back()]])
+
+
+def history_menu(tickets: Sequence[DownloadTicket]) -> InlineKeyboardMarkup:
+    """One replay button per past download, plus a way home."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            btn(
+                f"🔁 {texts.history_label(ticket)}",
+                callback_data=TicketCB(action="again", ticket=ticket.id).pack(),
+            )
+        ]
+        for ticket in tickets[:8]
+    ]
+    rows.append([_back("home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def broadcast_confirm_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                btn("📣 Send to everyone", style="success",
+                    callback_data=AdminCB(action="send").pack()),
+                btn("✖️ Abort", style="danger", callback_data=AdminCB(action="abort").pack()),
+            ],
+            [_back("home")],
+        ]
+    )
