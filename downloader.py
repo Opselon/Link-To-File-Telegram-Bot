@@ -19,14 +19,14 @@ from config import (
     DOWNLOAD_TIMEOUT,
     DOWNLOADS_DIR,
     HTTP_POOL_SIZE,
-    MAX_FILE_SIZE_MB,
+    UPLOAD_LIMIT_BYTES,
     PROXY_URL,
     YTDLP_CACHE_DIR,
     YTDLP_COOKIES_FILE,
     YTDLP_FRAGMENTS,
     YTDLP_PROXY,
 )
-from utils import clean_filename, strip_ansi
+from utils import clean_filename, format_size, strip_ansi
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 
-MAX_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+MAX_BYTES = UPLOAD_LIMIT_BYTES
 _PROGRESS_THROTTLE = 0.4
 
 
@@ -274,9 +274,11 @@ async def download_direct(
                 total_size = int(content_length) if content_length and content_length.isdigit() else 0
 
                 if total_size and total_size > MAX_BYTES:
+                    # Refuse before writing a single byte.
                     raise DownloadError(
-                        f"File is too large ({total_size // (1024 * 1024)} MB). "
-                        f"Limit is {MAX_FILE_SIZE_MB} MB."
+                        f"This file is {format_size(total_size)}, but the bot can "
+                        f"deliver at most {format_size(MAX_BYTES)}. Pick a smaller "
+                        "file or a lower media quality."
                     )
 
                 suggested = _filename_from_disposition(
@@ -300,7 +302,8 @@ async def download_direct(
                         downloaded += len(chunk)
                         if downloaded > MAX_BYTES:
                             raise DownloadError(
-                                f"File exceeded the {MAX_FILE_SIZE_MB} MB limit."
+                                f"The file passed {format_size(MAX_BYTES)} (the "
+                                "delivery limit), so the download was stopped early."
                             )
                         await handle.write(chunk)
 
@@ -502,7 +505,10 @@ async def download_with_ytdlp(
             raise
         lowered = message.lower()
         if "file is larger than max-filesize" in lowered or "larger than max" in lowered:
-            raise DownloadError(f"File is too large. Limit is {MAX_FILE_SIZE_MB} MB.")
+            raise DownloadError(
+                f"This file is larger than the {format_size(MAX_BYTES)} delivery "
+                "limit. Pick a lower quality."
+            )
         if "ffmpeg" in lowered and "not found" in lowered:
             raise DownloadError("FFmpeg is missing on the server; cannot process this media.")
         if "not a bot" in lowered or "confirm you" in lowered:
@@ -524,8 +530,15 @@ async def download_with_ytdlp(
         raise DownloadError("The download finished but no file was produced.")
 
     if path.stat().st_size > MAX_BYTES:
+        _cleanup_parts(download_id)
         _safe_unlink(path)
-        raise DownloadError(f"File is too large. Limit is {MAX_FILE_SIZE_MB} MB.")
+        raise DownloadError(
+            f"This file is larger than the {format_size(MAX_BYTES)} delivery "
+            "limit. Pick a lower quality."
+        )
+    # yt-dlp keeps the separated streams on disk until it has merged them; make
+    # sure nothing but the finished file survives.
+    _cleanup_parts(download_id, keep=path)
 
     width = info.get("width")
     height = info.get("height")
@@ -547,9 +560,15 @@ async def download_with_ytdlp(
     )
 
 
-def _cleanup_parts(download_id: int) -> None:
+def _cleanup_parts(download_id: int, keep: Optional[Path] = None) -> None:
+    """Delete partials, fragments and stray siblings for one download id."""
     for path in DOWNLOADS_DIR.glob(f"{download_id}_*"):
-        if path.suffix in {".part", ".ytdl", ".temp"}:
+        if keep is not None and path == keep:
+            continue
+        if path.suffix in {".part", ".ytdl", ".temp", ".frag", ".ytdlpart"}:
+            _safe_unlink(path)
+        elif keep is not None and path.is_file() and path != keep:
+            # left-over audio/video stream after a merge
             _safe_unlink(path)
 
 

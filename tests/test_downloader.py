@@ -76,7 +76,11 @@ async def test_oversized_download_is_rejected(mock_server):
     with patch("downloader.MAX_BYTES", 10):
         with pytest.raises(DownloadError) as excinfo:
             await download_file(url, 4321)
-    assert "too large" in str(excinfo.value).lower()
+    message = str(excinfo.value).lower()
+    assert "can deliver at most" in message
+    # nothing may be written for a file that can never be delivered
+    import downloader as d
+    assert not list(d.DOWNLOADS_DIR.glob("4321_*"))
 
 
 @pytest.mark.asyncio
@@ -155,3 +159,23 @@ def test_filename_from_disposition():
         == "naïve.txt"
     )
     assert _filename_from_disposition("") is None
+
+
+def test_partial_streams_are_swept(tmp_path, monkeypatch):
+    """A merged download must not leave video/audio streams behind."""
+    import downloader as d
+
+    keep = d.DOWNLOADS_DIR / "77_movie.mp4"
+    keep.write_bytes(b"final")
+    leftovers = [
+        d.DOWNLOADS_DIR / "77_movie.f137.mp4",
+        d.DOWNLOADS_DIR / "77_movie.f140.m4a",
+        d.DOWNLOADS_DIR / "77_movie.mp4.part",
+    ]
+    for path in leftovers:
+        path.write_bytes(b"x")
+
+    d._cleanup_parts(77, keep=keep)
+
+    assert keep.exists()
+    assert not any(path.exists() for path in leftovers)

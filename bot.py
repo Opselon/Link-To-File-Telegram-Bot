@@ -22,9 +22,15 @@ from config import (
     BOT_DISPLAY_NAME,
     BOT_TOKEN,
     DATA_DIR,
-    MAX_FILE_SIZE_MB,
+    DOWNLOADS_DIR,
+    JANITOR_INTERVAL,
+    MAX_PENDING_PER_USER,
+    MIN_FREE_DISK_MB,
     PROGRESS_INTERVAL,
     TELEGRAM_API_URL,
+    TEMP_FILE_TTL,
+    UPLOAD_LIMIT_BYTES,
+    UPLOAD_LIMIT_MB,
 )
 from core.version import VERSION
 from db import db
@@ -54,9 +60,6 @@ from utils import (
 from aiogram.types import FSInputFile
 
 logger = logging.getLogger(__name__)
-
-# Bot API cloud uploads are capped at 50 MB; a self-hosted server raises it.
-UPLOAD_LIMIT_MB = 2000 if TELEGRAM_API_URL else 50
 
 session = None
 if TELEGRAM_API_URL:
@@ -424,6 +427,11 @@ async def _enqueue(
         return False
 
     user_id = user_id or message.from_user.id
+    if sum(1 for owner in _inflight.values() if owner == user_id) >= MAX_PENDING_PER_USER:
+        await status.edit_text(ui.too_many_jobs_text(), parse_mode="HTML")
+        db.update_download_status(download_id, "failed")
+        return False
+
     cancel_event = asyncio.Event()
     _cancel_flags[user_id] = cancel_event
     _inflight[download_id] = user_id
@@ -446,6 +454,29 @@ async def _enqueue(
         db.update_download_status(download_id, "failed")
         return False
     return True
+
+
+def video_format(quality, cap: int) -> str:
+    """yt-dlp selector that never fetches more than ``cap`` bytes when possible.
+
+    Progressive (single-stream) formats come first: one file, no ffmpeg merge,
+    roughly half the disk and no video/audio leftovers. DASH muxing is the
+    fallback, and the final ``b`` guarantees *something* is always returned.
+    """
+    if quality == "best":
+        return (
+            f"b[ext=mp4][filesize<{cap}]/"
+            f"b[filesize<{cap}]/"
+            "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b"
+        )
+    return (
+        f"b[height<={quality}][ext=mp4][filesize<{cap}]/"
+        f"b[height<={quality}][filesize<{cap}]/"
+        f"bv*[height<={quality}][filesize<{cap}]+ba[filesize<{cap}]/"
+        f"b[height<={quality}][ext=mp4]/"
+        f"b[height<={quality}]/"
+        f"b[filesize<{cap}]/b"
+    )
 
 
 @dp.callback_query(F.data.startswith("q:"))
@@ -486,17 +517,8 @@ async def quality_chosen(callback: types.CallbackQuery) -> None:
         }
         header = f"🎵 <b>Audio · {quality} kbps</b>"
     else:
-        if quality == "best":
-            fmt = "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
-            label = "⚡ Best"
-        else:
-            fmt = (
-                f"bv*[height<={quality}][ext=mp4]+ba[ext=m4a]/"
-                f"b[height<={quality}][ext=mp4]/"
-                f"bv*[height<={quality}]+ba/b[height<={quality}]/"
-                "bv*+ba/b"
-            )
-            label = f"🎬 {quality}p"
+        fmt = video_format(quality, UPLOAD_LIMIT_BYTES)
+        label = "⚡ Best" if quality == "best" else f"🎬 {quality}p"
         options = {"format": fmt, "merge_output_format": "mp4"}
         header = f"🎬 <b>Video · {label}</b>"
 
@@ -605,6 +627,14 @@ async def execute_download(
     download_progress = ProgressUpdater(status_msg, download_id, header, cancel_event)
 
     try:
+        if cancel_event.is_set():
+            raise DownloadCancelled()
+        free_mb = shutil.disk_usage(DATA_DIR).free // (1024 * 1024)
+        if free_mb < MIN_FREE_DISK_MB:
+            raise DownloadError(
+                "The server is low on free disk space right now "
+                f"({free_mb} MB left). Try again in a little while."
+            )
         result = _as_result(
             await download_file(
                 url,
@@ -686,6 +716,7 @@ async def execute_download(
             _cancel_flags.pop(user_id, None)
         if file_path:
             cleanup_file(file_path)
+        _sweep_download(download_id)
 
 
 def _as_result(value) -> DownloadResult:
@@ -694,6 +725,54 @@ def _as_result(value) -> DownloadResult:
         return value
     path, size, title = value
     return DownloadResult(path=str(path), size=int(size), title=str(title))
+
+
+# --- Housekeeping -----------------------------------------------------------
+def _download_id_of(path) -> Optional[int]:
+    try:
+        return int(path.name.split("_", 1)[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _sweep_download(download_id: int) -> None:
+    """Remove every file belonging to one download id."""
+    for path in DOWNLOADS_DIR.glob(f"{download_id}_*"):
+        try:
+            if path.is_file():
+                path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.debug("Could not remove %s: %s", path, exc)
+
+
+def _sweep_temp_files() -> int:
+    """Delete leftovers from crashes and cancelled jobs; keep live downloads."""
+    now = time.time()
+    removed = 0
+    for path in DOWNLOADS_DIR.glob("*"):
+        if not path.is_file():
+            continue
+        if _download_id_of(path) in _inflight:
+            continue
+        try:
+            if now - path.stat().st_mtime < TEMP_FILE_TTL:
+                continue
+            path.unlink(missing_ok=True)
+            removed += 1
+        except OSError as exc:
+            logger.debug("Janitor could not remove %s: %s", path, exc)
+    if removed:
+        logger.info("Janitor removed %s stale file(s)", removed)
+    return removed
+
+
+async def _janitor_loop() -> None:
+    while True:
+        try:
+            _sweep_temp_files()
+        except Exception as exc:  # noqa: BLE001 - never kill the loop
+            logger.warning("Janitor sweep failed: %s", exc)
+        await asyncio.sleep(JANITOR_INTERVAL)
 
 
 # --- Lifecycle --------------------------------------------------------------
@@ -737,7 +816,7 @@ async def _notify_admin() -> None:
         await bot.send_message(
             ADMIN_ID,
             f"🚀 <b>{ui.BRAND}</b> is online · v{VERSION}\n"
-            f"⚙️ {download_queue.concurrency} workers · max {MAX_FILE_SIZE_MB} MB",
+            f"⚙️ {download_queue.concurrency} workers · max {UPLOAD_LIMIT_MB} MB",
             parse_mode="HTML",
             reply_markup=ui.main_menu(is_admin=True),
         )
@@ -751,11 +830,13 @@ async def start_bot() -> None:
     logger.info("Authenticated as @%s (id=%s)", me.username, me.id)
     await _configure_bot()
     download_queue.start()
+    janitor = asyncio.create_task(_janitor_loop(), name="janitor")
+    _sweep_temp_files()
     await _notify_admin()
     logger.info(
         "Ready · workers=%s · max_file=%sMB · api=%s",
         download_queue.concurrency,
-        MAX_FILE_SIZE_MB,
+        UPLOAD_LIMIT_MB,
         TELEGRAM_API_URL or "cloud",
     )
     try:
@@ -766,6 +847,7 @@ async def start_bot() -> None:
         )
     finally:
         logger.info("Shutting down…")
+        janitor.cancel()
         await download_queue.drain(timeout=20)
         await download_queue.stop()
         await close_session()

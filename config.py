@@ -54,6 +54,17 @@ ADMIN_ID = _int("ADMIN_ID", 0) or None
 # --- Limits -----------------------------------------------------------------
 # Telegram Bot API caps uploads at 2000 MB.
 MAX_FILE_SIZE_MB = _int("MAX_FILE_SIZE_MB", 2000, minimum=1, maximum=2000)
+
+# What the configured Bot API can actually deliver. Anything bigger is wasted
+# bandwidth and disk, so downloads are capped here, not at MAX_FILE_SIZE_MB.
+UPLOAD_LIMIT_MB = MAX_FILE_SIZE_MB if TELEGRAM_API_URL else min(MAX_FILE_SIZE_MB, 50)
+UPLOAD_LIMIT_BYTES = UPLOAD_LIMIT_MB * 1024 * 1024
+
+# Housekeeping: refuse work on a nearly full disk and sweep leftovers.
+MIN_FREE_DISK_MB = _int("MIN_FREE_DISK_MB", 512, minimum=0)
+TEMP_FILE_TTL = _int("TEMP_FILE_TTL", 900, minimum=60)
+JANITOR_INTERVAL = _int("JANITOR_INTERVAL", 300, minimum=60)
+MAX_PENDING_PER_USER = _int("MAX_PENDING_PER_USER", 2, minimum=1)
 DOWNLOAD_TIMEOUT = _int("DOWNLOAD_TIMEOUT", 600, minimum=10, maximum=86_400)
 QUEUE_TASK_TIMEOUT = _int("QUEUE_TASK_TIMEOUT", 1800, minimum=60, maximum=86_400)
 QUEUE_CONCURRENCY = _int("QUEUE_CONCURRENCY", 3, minimum=1, maximum=16)
