@@ -27,6 +27,14 @@ class DownloadFailed(BotError):
     pass
 
 
+class MediaUnavailable(DownloadFailed):
+    """The site answered, but handed back no media (private, gone, age-gated)."""
+
+
+class LoginRequired(DownloadFailed):
+    """The site wants a logged-in session before it releases the media."""
+
+
 class DownloadCancelled(BotError):
     def __init__(self, message: str = "Download cancelled.") -> None:
         super().__init__(message)

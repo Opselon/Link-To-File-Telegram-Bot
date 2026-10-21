@@ -39,7 +39,8 @@ def help_text(cap_mb: int = 50) -> str:
     return (
         f"<b>How {BRAND} works</b>\n\n"
         "<b>1.</b> Paste any public link.\n"
-        "<b>2.</b> Pick a quality (media links only).\n"
+        "<b>2.</b> Long video: pick a quality. Instagram, TikTok and X have no "
+        "quality step — they download the moment you send the link.\n"
         "<b>3.</b> I download it, send the file and delete it from disk.\n\n"
         "<b>Commands</b>\n"
         "• /start — main menu\n"
@@ -165,6 +166,44 @@ def queued_text(header: str, position: int) -> str:
     if position <= 0:
         return f"{header}\n\n⏳ <b>Queued</b>"
     return f"{header}\n\n⏳ <b>Queued</b> · {position} ahead of you"
+
+
+# --- v3.2: instant lane ------------------------------------------------------
+# Short-video sites serve one file per post, so the quality picker is noise:
+# the bot downloads straight away and says so on the card.
+_SITE_LABELS = {
+    "instagram.com": "Instagram",
+    "instagr.am": "Instagram",
+    "ig.me": "Instagram",
+    "tiktok.com": "TikTok",
+    "vm.tiktok.com": "TikTok",
+    "twitter.com": "X",
+    "x.com": "X",
+}
+
+
+def site_label(host: str) -> str:
+    name = (host or "").lower()
+    if name.startswith("www."):
+        name = name[4:]
+    if name in _SITE_LABELS:
+        return _SITE_LABELS[name]
+    for candidate, label in _SITE_LABELS.items():
+        if name.endswith("." + candidate):
+            return label
+    return name or "this link"
+
+
+def instant_header(host: str) -> str:
+    return f"⚡ <b>{html.escape(site_label(host))}</b> · auto quality"
+
+
+def instant_note(host: str) -> str:
+    """One-line explanation shown under the queued card."""
+    return (
+        f"{site_label(host)} gives one file per post, so there is no quality to pick — "
+        "I'm fetching the best version that fits the size cap."
+    )
 
 
 # --- v3.1: preview, history, broadcast --------------------------------------

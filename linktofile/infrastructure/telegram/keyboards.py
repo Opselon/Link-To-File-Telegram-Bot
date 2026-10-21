@@ -141,17 +141,20 @@ def result_menu(ticket: int, *, media: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def error_menu(ticket: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                btn("🔄 Try again", style="success",
-                    callback_data=TicketCB(action="again", ticket=ticket).pack()),
-                btn("🎚 Quality", callback_data=TicketCB(action="quality", ticket=ticket).pack()),
-            ],
-            [_back("home")],
+def error_menu(ticket: int, *, media: bool = True) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            btn("🔄 Try again", style="success",
+                callback_data=TicketCB(action="again", ticket=ticket).pack()),
         ]
-    )
+    ]
+    if media:
+        # Instant-lane tickets have no quality ladder, so the button is noise.
+        rows[0].append(
+            btn("🎚 Quality", callback_data=TicketCB(action="quality", ticket=ticket).pack())
+        )
+    rows.append([_back("home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def cancel_menu(ticket: int) -> InlineKeyboardMarkup:

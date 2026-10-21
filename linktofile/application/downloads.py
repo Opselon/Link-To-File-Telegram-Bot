@@ -13,6 +13,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol
+from urllib.parse import urlparse
 
 from linktofile.domain.errors import (
     BotError,
@@ -23,8 +24,16 @@ from linktofile.domain.errors import (
 from linktofile.domain.models import MediaAsset, Quality
 from linktofile.domain.policies import FormatPolicy
 from linktofile.domain.ports import DownloadEngine, TicketRepository
+from linktofile.shared.telemetry import Timer, pipeline
 
 logger = logging.getLogger(__name__)
+
+
+def _host(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:  # pragma: no cover - defensive
+        return ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +92,15 @@ class DownloadWorkflow:
         cancel_event: Optional[asyncio.Event] = None,
     ) -> None:
         asset: Optional[MediaAsset] = None
+        timer = Timer()
+        host = _host(job.url)
+        pipeline(
+            "job.start",
+            ticket=job.ticket_id,
+            user=job.user_id,
+            host=host,
+            quality=job.quality.label,
+        )
         try:
             self._guard_disk()
             self._tickets.update(job.ticket_id, _status("downloading"))
@@ -92,6 +110,14 @@ class DownloadWorkflow:
                 job.quality,
                 on_progress=on_progress,
                 cancel_event=cancel_event,
+            )
+            pipeline(
+                "job.fetched",
+                ticket=job.ticket_id,
+                host=host,
+                bytes=asset.size,
+                ms=timer.elapsed,
+                source=asset.source,
             )
             if not self._policy.accepts(asset.size):
                 raise MediaTooLarge(
@@ -108,12 +134,21 @@ class DownloadWorkflow:
             await delivery.delivering(asset)
             await delivery.delivered(asset)
             self._tickets.update(job.ticket_id, _status("completed"))
+            pipeline(
+                "job.done",
+                ticket=job.ticket_id,
+                host=host,
+                bytes=asset.size,
+                ms=timer.elapsed,
+            )
 
         except DownloadCancelled:
             self._tickets.update(job.ticket_id, _status("cancelled"))
+            pipeline("job.cancelled", ticket=job.ticket_id, host=host, ms=timer.elapsed)
             await delivery.cancelled()
         except asyncio.CancelledError:
             self._tickets.update(job.ticket_id, _status("cancelled"))
+            pipeline("job.cancelled", ticket=job.ticket_id, host=host, ms=timer.elapsed)
             # A fresh task survives the cancellation that is unwinding us, so the
             # user still gets the "cancelled" card even if the socket was hung.
             asyncio.create_task(_quietly(delivery.cancelled()))
@@ -121,10 +156,28 @@ class DownloadWorkflow:
         except BotError as exc:
             self._tickets.update(job.ticket_id, _status("failed"))
             logger.info("Ticket %s failed: %s", job.ticket_id, exc)
+            pipeline(
+                "job.failed",
+                ticket=job.ticket_id,
+                host=host,
+                ms=timer.elapsed,
+                category=type(exc).__name__,
+                reason=str(exc)[:200],
+                level=logging.WARNING,
+            )
             await delivery.failed(exc)
-        except Exception:  # noqa: BLE001 - last line of defence
+        except Exception as exc:  # noqa: BLE001 - last line of defence
             self._tickets.update(job.ticket_id, _status("failed"))
             logger.exception("Unexpected failure for ticket %s", job.ticket_id)
+            pipeline(
+                "job.failed",
+                ticket=job.ticket_id,
+                host=host,
+                ms=timer.elapsed,
+                category=type(exc).__name__,
+                reason=str(exc)[:200],
+                level=logging.ERROR,
+            )
             await delivery.failed(BotError("Something broke on my side. Try again in a moment."))
         finally:
             self._discard(job.ticket_id, asset)

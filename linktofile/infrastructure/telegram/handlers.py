@@ -18,7 +18,7 @@ from linktofile.application.container import Services
 from linktofile.application.downloads import DownloadJob
 from linktofile.domain.errors import QueueSaturated
 from linktofile.domain.models import DownloadTicket, MediaInfo, Quality, QualityKind
-from linktofile.infrastructure.download.engine import is_media_site
+from linktofile.infrastructure.download.engine import is_instant_url, is_media_site, url_host
 from linktofile.infrastructure.telegram import keyboards, texts
 from linktofile.infrastructure.telegram.callbacks import (
     AdminCB,
@@ -29,6 +29,7 @@ from linktofile.infrastructure.telegram.callbacks import (
 )
 from linktofile.infrastructure.telegram.delivery import TelegramDelivery
 from linktofile.infrastructure.telegram.states import AdminFlow
+from linktofile.shared.telemetry import pipeline
 from linktofile.shared.utils import is_media_url, is_safe_url, is_valid_url
 
 logger = logging.getLogger(__name__)
@@ -124,10 +125,17 @@ async def _enqueue(
     message: Message,
     *,
     media: bool,
+    header: Optional[str] = None,
+    note: Optional[str] = None,
 ) -> bool:
-    header = _header(quality)
+    header = header or _header(quality)
     delivery = TelegramDelivery(
-        services.bot, message, ticket_id=ticket.id, header=header, media=media
+        services.bot,
+        message,
+        ticket_id=ticket.id,
+        header=header,
+        media=media,
+        admin_id=getattr(services, "admin_id", None),
     )
     event = services.active.open(ticket.user_id, ticket.id)
     job = DownloadJob(ticket_id=ticket.id, user_id=ticket.user_id, url=ticket.url, quality=quality)
@@ -151,8 +159,11 @@ async def _enqueue(
         )
         return False
 
+    card = texts.queued_text(header, position)
+    if note:
+        card += f"\n\n{note}"
     await message.answer(
-        texts.queued_text(header, position),
+        card,
         parse_mode="HTML",
         reply_markup=keyboards.progress_menu(ticket.id),
     )
@@ -236,29 +247,59 @@ async def on_text(message: Message, services: Services) -> None:
         return
 
     url = text.split()[0]
+    host = url_host(url)
+    pipeline(
+        "link.received",
+        user=user_id,
+        host=host,
+        media=is_media_url(url),
+        instant=is_instant_url(url),
+    )
     if not is_valid_url(url):
+        pipeline("link.rejected", user=user_id, host=host, reason="invalid")
         await message.answer("🤔 That doesn't look like a link. Try again?", parse_mode="HTML")
         return
     if not is_safe_url(url):
+        pipeline("link.rejected", user=user_id, host=host, reason="unsafe")
         await message.answer(texts.blocked_url_text(), parse_mode="HTML")
         return
     if not services.limiter.hit(user_id):
+        pipeline("link.rejected", user=user_id, host=host, reason="rate_limited")
         await message.answer(
             texts.rate_limited_text(services.limiter.remaining(user_id)), parse_mode="HTML"
         )
         return
     if await _enforce_gate(message, services):
+        pipeline("link.rejected", user=user_id, host=host, reason="force_join")
         return
 
     services.users.register(user_id)
     ticket = services.tickets.create(user_id, url)
 
+    if is_instant_url(url):
+        # Instagram and friends publish one file per post: asking "which
+        # quality?" adds a round-trip and a preview probe before the very same
+        # download. Fetch it now, at the best quality that fits the cap.
+        pipeline("route.instant", ticket=ticket.id, host=host)
+        await _enqueue(
+            services,
+            ticket,
+            Quality.video(None),
+            message,
+            media=False,
+            header=texts.instant_header(host),
+            note=texts.instant_note(host),
+        )
+        return
+
     if is_media_url(url):
         default = services.prefs.get(user_id)
         info = await services.preview.describe(url) if is_media_site(url) else None
+        pipeline("route.picker", ticket=ticket.id, host=host, preview=info is not None)
         await _show_quality_card(message, ticket, default=default, info=info)
         return
 
+    pipeline("route.direct", ticket=ticket.id, host=host)
     await _enqueue(services, ticket, Quality.video(None), message, media=False)
 
 
@@ -344,6 +385,19 @@ async def on_ticket(
         return
 
     if callback_data.action == "quality":
+        if is_instant_url(ticket.url):
+            # One file per post: there is nothing to choose, so "change quality"
+            # means "fetch it again".
+            await _enqueue(
+                services,
+                ticket,
+                Quality.video(None),
+                callback.message,
+                media=False,
+                header=texts.instant_header(url_host(ticket.url)),
+            )
+            await callback.answer("⚡ Auto quality — fetching again")
+            return
         await callback.message.edit_text(
             "🎚 <b>Pick another quality</b>",
             parse_mode="HTML",
@@ -359,6 +413,18 @@ async def on_ticket(
         await callback.answer("Join the channel first ⚠️", show_alert=True)
         return
     fresh = services.tickets.create(ticket.user_id, ticket.url)
+    if is_instant_url(ticket.url):
+        pipeline("route.instant", ticket=fresh.id, host=url_host(ticket.url), via="retry")
+        await _enqueue(
+            services,
+            fresh,
+            Quality.video(None),
+            callback.message,
+            media=False,
+            header=texts.instant_header(url_host(ticket.url)),
+        )
+        await callback.answer()
+        return
     if is_media_url(ticket.url):
         await callback.message.edit_text(
             "🎚 <b>Pick a quality</b>",

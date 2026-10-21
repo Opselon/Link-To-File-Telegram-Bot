@@ -87,6 +87,18 @@ PREVIEW_WAIT = _int("PREVIEW_WAIT", 5, minimum=0, maximum=60)
 
 LOG_LEVEL = _text("LOG_LEVEL", "INFO").upper()
 
+# Short-video sites where a quality picker is pure friction: one file is all the
+# site offers, so the bot downloads immediately at the best quality instead of
+# asking. Comma-separated hosts (subdomains included).
+DEFAULT_INSTANT_HOSTS = (
+    "instagram.com,instagr.am,ig.me,tiktok.com,vm.tiktok.com,x.com,twitter.com"
+)
+INSTANT_HOSTS = tuple(
+    host.strip().lower().lstrip(".")
+    for host in _text("INSTANT_HOSTS", DEFAULT_INSTANT_HOSTS).split(",")
+    if host.strip()
+)
+
 # Optional egress settings (needed where YouTube or a file host is blocked).
 # Examples: socks5://127.0.0.1:9050 · http://user:pass@proxy:3128
 PROXY_URL = _text("PROXY_URL") or None

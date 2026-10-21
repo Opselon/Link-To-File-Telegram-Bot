@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, Optional
 
 from linktofile.domain.errors import QueueSaturated
 from linktofile.domain.models import QueueSnapshot
+from linktofile.shared.telemetry import pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,7 @@ class _Item:
     kwargs: dict = field(default_factory=dict)
     key: Optional[int] = None
     user_id: Optional[int] = None
+    queued_at: float = field(default_factory=time.monotonic)
 
 
 class DownloadQueue:
@@ -89,7 +92,13 @@ class DownloadQueue:
 
         if user_id is not None:
             self._per_user[user_id] += 1
-        logger.info("Queued job (waiting=%s active=%s user=%s)", self.pending, self._active, user_id)
+        pipeline(
+            "job.queued",
+            ticket=key,
+            user=user_id,
+            waiting=self.pending,
+            active=self._active,
+        )
         return max(self.pending - 1, 0)
 
     def cancel(self, key: int) -> bool:
@@ -111,6 +120,14 @@ class DownloadQueue:
         while self._running:
             item = await self._queue.get()
             self._active += 1
+            started = time.monotonic()
+            pipeline(
+                "job.dequeue",
+                ticket=item.key,
+                user=item.user_id,
+                wait_ms=int((started - item.queued_at) * 1000),
+                active=self._active,
+            )
             task: Optional[asyncio.Task] = None
             skipped = item.key is not None and item.key in self._cancelled
             try:
@@ -127,7 +144,13 @@ class DownloadQueue:
                 else:
                     raise
             except asyncio.TimeoutError:
-                logger.error("Job %s timed out after %ss", index, self.task_timeout)
+                logger.error("Job %s timed out after %ss", item.key, self.task_timeout)
+                pipeline(
+                    "job.timeout",
+                    ticket=item.key,
+                    timeout_s=self.task_timeout,
+                    level=logging.ERROR,
+                )
             except Exception as exc:  # noqa: BLE001 - one bad job must not kill a worker
                 logger.exception("Worker %s job failed: %s", index, exc)
             finally:
@@ -139,6 +162,13 @@ class DownloadQueue:
                     if not self._per_user[item.user_id]:
                         self._per_user.pop(item.user_id, None)
                 self._active = max(0, self._active - 1)
+                pipeline(
+                    "job.release",
+                    ticket=item.key,
+                    worker=index,
+                    total_ms=int((time.monotonic() - started) * 1000),
+                    active=self._active,
+                )
                 self._queue.task_done()
 
     # --- lifecycle ----------------------------------------------------------
