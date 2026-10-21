@@ -140,6 +140,15 @@ jobs:
           (cd dist && sha256sum ./*.zip ./*.tar.gz > SHA256SUMS.txt)
           ls -lh dist
 
+      - name: Attach the container digests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          docker pull "${IMAGE}:${TAG}"
+          docker image inspect "${IMAGE}:${TAG}" --format '{{json .RootFS.Layers}}' > "dist/${TAG}.layers.json" || true
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

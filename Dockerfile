@@ -1,5 +1,5 @@
 # syntax: docker/dockerfile:1
-FROM python:3.12-slim AS runtime
+FROM python:3.12-alpine
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -7,19 +7,20 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     DATA_DIR=/data
 
-# ffmpeg is the only system dependency (media merging + mp3 conversion).
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# ffmpeg is the only system dependency (media muxing + mp3). Alpine's package
+# is ~10x smaller than Debian's, which keeps the image around 200 MB.
+RUN apk add --no-cache ffmpeg ca-certificates tzdata \
+    && rm -rf /var/cache/apk/*
 
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && python -m pip uninstall -y pip setuptools wheel >/dev/null 2>&1 || true
 
 COPY . .
 
-RUN useradd --create-home --uid 10001 bot \
+RUN adduser -D -u 10001 -h /home/bot bot \
     && mkdir -p /data \
     && chown -R bot:bot /data /app
 
