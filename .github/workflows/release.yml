@@ -140,15 +140,6 @@ jobs:
           (cd dist && sha256sum ./*.zip ./*.tar.gz > SHA256SUMS.txt)
           ls -lh dist
 
-      - name: Attach the container digests
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.prepare.outputs.tag }}
-        run: |
-          set -euo pipefail
-          docker pull "${IMAGE}:${TAG}"
-          docker image inspect "${IMAGE}:${TAG}" --format '{{json .RootFS.Layers}}' > "dist/${TAG}.layers.json" || true
-
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -158,6 +149,7 @@ jobs:
           set -euo pipefail
           gh release create "${TAG}" --title "⚡ Link → File ${TAG}" --generate-notes || true
 
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
           cat > header.md <<EOF
           ### Run it in one line
 
@@ -168,11 +160,11 @@ jobs:
           ### Docker
 
           \`\`\`bash
-          docker pull ghcr.io/${GITHUB_REPOSITORY_OWNER}/link-to-file-telegram-bot:${TAG}
+          docker pull ghcr.io/${owner}/link-to-file-telegram-bot:${TAG}
           docker run -d --name link-to-file --restart unless-stopped \\
             -e BOT_TOKEN=<your-token> -e ADMIN_ID=<your-id> \\
             -v link-to-file-data:/data \\
-            ghcr.io/${GITHUB_REPOSITORY_OWNER}/link-to-file-telegram-bot:${TAG}
+            ghcr.io/${owner}/link-to-file-telegram-bot:${TAG}
           \`\`\`
 
           Full changelog below.
