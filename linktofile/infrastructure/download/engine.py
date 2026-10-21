@@ -517,6 +517,7 @@ def _build_ytdlp_options(
 
     if progress_callback or cancel_event:
         last_report = [0.0]
+        warned = [False]
 
         def hook(data: dict) -> None:
             _check_cancel(cancel_event)
@@ -526,12 +527,20 @@ def _build_ytdlp_options(
             if now - last_report[0] < _PROGRESS_THROTTLE:
                 return
             last_report[0] = now
-            progress_callback(
-                data.get("downloaded_bytes", 0),
-                data.get("total_bytes") or data.get("total_bytes_estimate") or 0,
-                data.get("speed") or 0,
-                data.get("eta") or 0,
-            )
+            try:
+                progress_callback(
+                    data.get("downloaded_bytes", 0),
+                    data.get("total_bytes") or data.get("total_bytes_estimate") or 0,
+                    data.get("speed") or 0,
+                    data.get("eta") or 0,
+                )
+            except Exception as exc:  # noqa: BLE001 - a UI refresh must never fail a download
+                # Hooks run inside yt-dlp's download loop: letting a card update
+                # raise here aborts the transfer and reports a download failure.
+                if not warned[0]:
+                    warned[0] = True
+                    logger.warning("Progress callback failed (ignored): %s", exc)
+                return
 
         ydl_opts["progress_hooks"] = [hook]
 

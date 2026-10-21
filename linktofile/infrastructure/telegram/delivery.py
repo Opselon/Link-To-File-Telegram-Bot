@@ -31,6 +31,15 @@ _ALERT_WINDOW = 3600.0
 _ALERT_LIMIT = 10
 _ALERT_TIMES: deque[float] = deque()
 
+# Fire-and-forget card refreshes need a strong reference until they finish,
+# otherwise the event loop can garbage-collect them mid-flight.
+_CARD_TASKS: set[asyncio.Task] = set()
+
+
+def _keep(task: asyncio.Task) -> None:
+    _CARD_TASKS.add(task)
+    task.add_done_callback(_CARD_TASKS.discard)
+
 
 class Card:
     """Throttled, failure-tolerant editor for one status message."""
@@ -41,6 +50,12 @@ class Card:
         self._last = 0.0
         self._last_text = ""
         self._closed = False
+        # The card is built inside a handler, so a loop is running here. Keep it:
+        # progress hooks fire later from worker threads and must hop back onto it.
+        try:
+            self._loop: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
+        except RuntimeError:  # pragma: no cover - only outside a running bot
+            self._loop = None
 
     async def show(
         self,
@@ -70,6 +85,37 @@ class Card:
             logger.debug("card edit failed: %s", exc)
         except Exception as exc:  # noqa: BLE001 - a card must never break a job
             logger.debug("card edit error: %s", exc)
+
+    def schedule(
+        self, text: str, *, markup: Optional[InlineKeyboardMarkup] = None
+    ) -> None:
+        """Refresh the card without blocking, from any thread.
+
+        yt-dlp's progress hooks and the upload stream run off-loop (worker
+        threads), where ``asyncio.create_task`` raises "no running event loop".
+        That used to surface as a failed ticket, so hop back onto the loop that
+        owns this card instead — and never raise into the caller.
+        """
+        coro = self.show(text, markup=markup)
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            coro.close()  # nothing to update; never leak an un-awaited coroutine
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            _keep(asyncio.create_task(coro))
+            return
+
+        def _start() -> None:
+            _keep(asyncio.create_task(coro))
+
+        try:
+            loop.call_soon_threadsafe(_start)
+        except RuntimeError:  # loop closed between the check and the hop
+            coro.close()
 
     async def close(self) -> None:
         self._closed = True
@@ -107,7 +153,7 @@ class TelegramDelivery:
             self._header,
             get_progress_bar(downloaded, total, speed, eta, stage="⬇️ Downloading"),
         )
-        asyncio.create_task(self.card.show(text, markup=keyboards.progress_menu(self._ticket)))
+        self.card.schedule(text, markup=keyboards.progress_menu(self._ticket))
 
     # --- Delivery port ------------------------------------------------------
     async def delivering(self, asset: MediaAsset) -> None:
@@ -210,4 +256,4 @@ class TelegramDelivery:
             f"{self._header}\n\n📦 {format_size(total)}",
             get_progress_bar(sent, total, speed, eta, stage="⬆️ Uploading"),
         )
-        asyncio.create_task(self.card.show(text, markup=keyboards.progress_menu(self._ticket)))
+        self.card.schedule(text, markup=keyboards.progress_menu(self._ticket))

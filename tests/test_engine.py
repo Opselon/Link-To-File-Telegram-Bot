@@ -87,6 +87,25 @@ def test_options_add_a_progress_hook_when_asked():
     assert len(options["progress_hooks"]) == 1
 
 
+def test_progress_hook_survives_a_broken_callback():
+    def boom(*args):
+        raise RuntimeError("no running event loop")
+
+    hook = _build_ytdlp_options(1, progress_callback=boom)["progress_hooks"][0]
+    # yt-dlp calls this from its download thread; an exception in the hook used
+    # to abort the whole transfer and fail the ticket.
+    hook({"status": "downloading", "downloaded_bytes": 1, "total_bytes": 2})
+    hook({"status": "finished"})
+
+
+def test_progress_hook_still_honours_cancel():
+    cancelled = asyncio.Event()
+    cancelled.set()
+    hook = _build_ytdlp_options(1, cancel_event=cancelled)["progress_hooks"][0]
+    with pytest.raises(DownloadCancelled):
+        hook({"status": "downloading", "downloaded_bytes": 1, "total_bytes": 2})
+
+
 def test_options_merge_quality_overrides():
     options = _build_ytdlp_options(1, {"format": "b[height<=480]"})
     assert options["format"] == "b[height<=480]"
