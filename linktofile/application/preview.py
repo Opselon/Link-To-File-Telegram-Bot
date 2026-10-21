@@ -29,7 +29,8 @@ class PreviewService:
         capacity: int = 2_000,
     ) -> None:
         self._probe = probe
-        self._timeout = max(0.1, float(timeout))
+        # timeout <= 0 disables previews entirely (no probe, no delay)
+        self._timeout = float(timeout)
         self._ttl = max(0.0, float(ttl))
         self._capacity = max(1, int(capacity))
         self._cache: dict[str, tuple[MediaInfo, float]] = {}
@@ -40,6 +41,9 @@ class PreviewService:
 
     async def describe(self, url: str) -> Optional[MediaInfo]:
         """Return metadata for ``url``, or ``None`` when it cannot be read in time."""
+        if self._timeout <= 0:
+            return None
+
         cached = self._cache.get(url)
         now = time.monotonic()
         if cached is not None and now - cached[1] < self._ttl:

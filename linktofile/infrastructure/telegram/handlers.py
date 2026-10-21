@@ -270,11 +270,24 @@ async def on_quality(
     if callback_data.kind == "forget":
         services.prefs.clear(callback.from_user.id)
         if callback.message is not None:
-            await callback.message.edit_text(
-                "🎚 <b>Pick a quality</b>",
-                parse_mode="HTML",
-                reply_markup=keyboards.quality_menu(callback_data.ticket),
-            )
+            markup = keyboards.quality_menu(callback_data.ticket)
+            # The picker may live on a photo card: editing "text" there fails
+            # on Telegram, so the caption is the thing to rewrite.
+            try:
+                if getattr(callback.message, "photo", None):
+                    await callback.message.edit_caption(
+                        caption="🎚 <b>Pick a quality</b>",
+                        parse_mode="HTML",
+                        reply_markup=markup,
+                    )
+                else:
+                    await callback.message.edit_text(
+                        "🎚 <b>Pick a quality</b>",
+                        parse_mode="HTML",
+                        reply_markup=markup,
+                    )
+            except TelegramBadRequest as exc:
+                logger.debug("Could not refresh the picker after reset: %s", exc)
         await callback.answer("Preference cleared ↺")
         return
 

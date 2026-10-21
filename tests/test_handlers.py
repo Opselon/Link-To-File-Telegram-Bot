@@ -33,7 +33,9 @@ class FakeMessage:
         self.from_user = USER
         self.answers: list[str] = []
         self.edits: list[str] = []
+        self.captions: list[str] = []
         self.photos: list[str] = []
+        self.photo = None
         self.markups: list = []
         self.deleted = False
 
@@ -50,6 +52,11 @@ class FakeMessage:
 
     async def edit_text(self, text, **kwargs):
         self.edits.append(text)
+        self.markups.append(kwargs.get("reply_markup"))
+        return self
+
+    async def edit_caption(self, caption=None, **kwargs):
+        self.captions.append(caption or "")
         self.markups.append(kwargs.get("reply_markup"))
         return self
 
@@ -321,3 +328,37 @@ def test_plain_text_is_closed_while_an_admin_flow_is_open():
 
     assert states, "on_text must carry a StateFilter"
     assert states[0].states == (None,)
+
+
+async def test_reset_edits_the_caption_of_a_photo_card(services):
+    """The picker sits on a photo card: text edits fail there, captions work."""
+    services.prefs.set(USER.id, Quality.video(720))
+    ticket = services.tickets.create(USER.id, "https://youtu.be/dQw4w9WgXcQ")
+    message = FakeMessage()
+    message.photo = [object()]
+    callback = FakeCallback(message)
+
+    await handlers.on_quality(
+        callback, QualityCB(kind="forget", value="-", ticket=ticket.id), services
+    )
+
+    assert services.prefs.get(USER.id) is None
+    assert message.captions == ["🎚 <b>Pick a quality</b>"]
+    assert message.edits == []
+
+
+def test_previews_can_be_switched_off_with_zero_timeout():
+    import asyncio
+
+    from linktofile.application.preview import PreviewService
+
+    class Probe:
+        calls = 0
+
+        async def probe(self, url):
+            Probe.calls += 1
+            return INFO
+
+    service = PreviewService(Probe(), timeout=0)
+    assert asyncio.run(service.describe("https://youtu.be/x")) is None
+    assert Probe.calls == 0

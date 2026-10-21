@@ -113,7 +113,7 @@ def build_application() -> Application:
         policy=policy,
         limiter=RateLimiter(RATE_LIMIT_SECONDS),
         active=ActiveJobs(),
-        preview=PreviewService(YtDlpProbe(), timeout=max(0.1, PREVIEW_TIMEOUT)),
+        preview=PreviewService(YtDlpProbe(), timeout=PREVIEW_TIMEOUT),
         prefs=UserPreferences(settings_repo),
         cap_mb=UPLOAD_LIMIT_MB,
         admin_id=ADMIN_ID,
