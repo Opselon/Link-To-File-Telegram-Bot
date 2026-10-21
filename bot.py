@@ -300,9 +300,13 @@ async def cmd_version(message: types.Message) -> None:
 async def cmd_cancel(message: types.Message) -> None:
     if not message.from_user:
         return
-    flag = _cancel_flags.get(message.from_user.id)
+    user_id = message.from_user.id
+    flag = _cancel_flags.get(user_id)
+    mine = [ticket for ticket, owner in _inflight.items() if owner == user_id]
     if flag and not flag.is_set():
         flag.set()
+    stopped = sum(1 for ticket in mine if download_queue.cancel(ticket))
+    if stopped or mine or flag:
         await message.answer(ui.cancel_text(), parse_mode="HTML")
     else:
         await message.answer("Nothing is running right now. 🌤", parse_mode="HTML")
@@ -448,6 +452,7 @@ async def _enqueue(
             ytdlp_options,
             cancel_event,
             user_id=user_id,
+            job_key=download_id,
         )
     except QueueFull:
         _inflight.pop(download_id, None)
@@ -569,7 +574,14 @@ async def job_router(callback: types.CallbackQuery) -> None:
         flag = _cancel_flags.get(callback.from_user.id)
         if flag and not flag.is_set():
             flag.set()
-        await callback.answer("Cancelling…")
+        stopped = download_queue.cancel(download_id)
+        await callback.answer("🛑 Cancelled" if stopped else "Nothing left to stop")
+        if stopped and callback.message:
+            await safe_edit(
+                callback.message,
+                ui.cancel_text(),
+                reply_markup=ui.cancel_menu(download_id),
+            )
         return
 
     if action == "quality":
@@ -689,6 +701,17 @@ async def execute_download(
         except TelegramBadRequest:
             pass
 
+    except asyncio.CancelledError:
+        db.update_download_status(download_id, "cancelled")
+        try:
+            await safe_edit(
+                status_msg,
+                ui.cancel_text(),
+                reply_markup=ui.cancel_menu(download_id),
+            )
+        except Exception:  # noqa: BLE001 - the task is already being torn down
+            pass
+        raise
     except DownloadCancelled:
         db.update_download_status(download_id, "cancelled")
         await safe_edit(

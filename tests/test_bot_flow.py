@@ -22,7 +22,7 @@ def _message(text: str, user_id: int = 123):
 
 
 async def _run_now(coro_func, *args, **kwargs):
-    await coro_func(*args, **kwargs)
+    await coro_func(*args[:6], **{k: v for k, v in kwargs.items() if k != "job_key"})
 
 
 @pytest.mark.asyncio
@@ -277,3 +277,36 @@ async def test_failed_upload_still_deletes_the_file(tmp_path):
     assert not produced.exists()
     assert not list(bot.DOWNLOADS_DIR.glob("5555_*"))
     assert 5555 not in bot._inflight
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_running_job_stops_it_and_cleans_up(tmp_path):
+    import asyncio
+
+    import bot
+
+    produced = bot.DOWNLOADS_DIR / "6666_clip.mp4"
+    produced.write_bytes(b"z" * 32)
+    status = AsyncMock()
+    message = _message("https://example.com/clip.mp4")
+
+    async def stalled_download(*args, **kwargs):
+        await asyncio.sleep(3600)  # pretend the socket is stalled
+
+    with (
+        patch("bot.download_file", stalled_download),
+        patch("bot.db.update_download_status") as update,
+        patch("bot.safe_edit", AsyncMock()) as edit,
+    ):
+        task = asyncio.create_task(
+            bot.execute_download(message, status, "https://example.com/clip.mp4", 6666, "h")
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()                       # what queue.cancel() does
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    statuses = [call.args[1] for call in update.call_args_list]
+    assert "cancelled" in statuses
+    edit.assert_awaited_once()
+    assert not produced.exists()
