@@ -81,6 +81,9 @@ HTTP_POOL_SIZE = _int("HTTP_POOL_SIZE", 64, minimum=4, maximum=256)
 # How long a media page may take to describe itself before the bot shows the
 # plain quality picker instead. 0 disables the preview card entirely.
 PREVIEW_TIMEOUT = _int("PREVIEW_TIMEOUT", 12, minimum=0, maximum=60)
+# How long the picker may wait for the preview before showing up without it;
+# the probe keeps running in the background either way.
+PREVIEW_WAIT = _int("PREVIEW_WAIT", 5, minimum=0, maximum=60)
 
 LOG_LEVEL = _text("LOG_LEVEL", "INFO").upper()
 

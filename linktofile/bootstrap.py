@@ -25,6 +25,7 @@ from linktofile.config import (
     MAX_PENDING_PER_USER,
     MIN_FREE_DISK_MB,
     PREVIEW_TIMEOUT,
+    PREVIEW_WAIT,
     QUEUE_CONCURRENCY,
     QUEUE_MAX_SIZE,
     QUEUE_TASK_TIMEOUT,
@@ -113,7 +114,7 @@ def build_application() -> Application:
         policy=policy,
         limiter=RateLimiter(RATE_LIMIT_SECONDS),
         active=ActiveJobs(),
-        preview=PreviewService(YtDlpProbe(), timeout=PREVIEW_TIMEOUT),
+        preview=PreviewService(YtDlpProbe(), timeout=PREVIEW_TIMEOUT, wait=PREVIEW_WAIT),
         prefs=UserPreferences(settings_repo),
         cap_mb=UPLOAD_LIMIT_MB,
         admin_id=ADMIN_ID,
@@ -121,10 +122,11 @@ def build_application() -> Application:
     )
 
     logger.info(
-        "Wired: db=%s cap=%sMB workers=%s preview=%ss",
+        "Wired: db=%s cap=%sMB workers=%s preview=%ss/%ss",
         DB_PATH,
         UPLOAD_LIMIT_MB,
         QUEUE_CONCURRENCY,
+        PREVIEW_WAIT,
         PREVIEW_TIMEOUT,
     )
     return Application(bot=bot, dispatcher=build_dispatcher(services), services=services)
