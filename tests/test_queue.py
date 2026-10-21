@@ -90,3 +90,55 @@ async def test_stop_cancels_workers():
     assert len(queue.workers) == 2
     await queue.stop()
     assert queue.workers == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_interrupts_a_blocked_job():
+    """A job stuck on I/O must stop at once, not at the next progress tick."""
+    import asyncio
+
+    from queue_manager import DownloadQueue
+
+    queue = DownloadQueue(concurrency=1)
+    queue.start()
+    started = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    async def stuck_job():
+        started.set()
+        try:
+            await asyncio.sleep(3600)      # stands in for a stalled socket
+        finally:
+            cleaned.set()
+
+    try:
+        await queue.add_task(stuck_job, job_key=99)
+        await asyncio.wait_for(started.wait(), timeout=2)
+        assert queue.cancel(99) is True
+        await asyncio.wait_for(cleaned.wait(), timeout=2)
+        # the worker survived and can take the next job
+        ran = asyncio.Event()
+
+        async def quick():
+            ran.set()
+
+        await queue.add_task(quick, job_key=100)
+        await asyncio.wait_for(ran.wait(), timeout=2)
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_marks_queued_job_before_it_starts():
+    import asyncio
+
+    from queue_manager import DownloadQueue
+
+    queue = DownloadQueue(concurrency=1)   # not started: nothing runs yet
+
+    async def job():
+        await asyncio.sleep(0)
+
+    await queue.add_task(job, job_key=7)
+    assert queue.cancel(7) is True
+    assert queue.cancel(12345) is False
