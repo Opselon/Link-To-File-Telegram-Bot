@@ -19,6 +19,7 @@ from linktofile.config import (
     DOWNLOAD_TIMEOUT,
     DOWNLOADS_DIR,
     HTTP_POOL_SIZE,
+    INSTANT_HOSTS,
     UPLOAD_LIMIT_BYTES,
     PROXY_URL,
     YTDLP_CACHE_DIR,
@@ -26,6 +27,13 @@ from linktofile.config import (
     YTDLP_FRAGMENTS,
     YTDLP_PROXY,
 )
+from linktofile.domain.errors import (
+    DownloadCancelled as CancelledError,
+    DownloadFailed,
+    LoginRequired,
+    MediaUnavailable,
+)
+from linktofile.shared.telemetry import Timer, pipeline
 from linktofile.shared.utils import clean_filename, format_size, strip_ansi
 
 logger = logging.getLogger(__name__)
@@ -39,13 +47,17 @@ MAX_BYTES = UPLOAD_LIMIT_BYTES
 _PROGRESS_THROTTLE = 0.4
 
 
-class DownloadError(Exception):
-    """A user-presentable download failure."""
+class DownloadError(DownloadFailed):
+    """A user-presentable download failure.
+
+    Subclassing ``DownloadFailed`` (a ``BotError``) is what lets the workflow
+    render the reason to the user: a plain ``Exception`` here used to fall
+    through to "Something broke on my side", which hid every real cause.
+    """
 
 
-class DownloadCancelled(DownloadError):
-    def __init__(self, message: str = "Download cancelled."):
-        super().__init__(message)
+class DownloadCancelled(CancelledError, DownloadError):
+    """The user stopped this download (recognised as a cancel, not a failure)."""
 
 
 class _NeedsExtractor(Exception):
@@ -201,6 +213,19 @@ def is_media_site(url: str) -> bool:
     return is_media_url(url)
 
 
+def is_instant_url(url: str) -> bool:
+    """True for sites that should skip the quality picker entirely.
+
+    Instagram (and anything else in ``INSTANT_HOSTS``) serves one media file per
+    post, so asking "which quality?" only adds a round-trip and a preview probe
+    before the same download happens. Those links go straight to the queue.
+    """
+    host = url_host(url)
+    if not host:
+        return False
+    return any(host == candidate or host.endswith("." + candidate) for candidate in INSTANT_HOSTS)
+
+
 def redact_url(url: str) -> str:
     """Log-friendly URL (host + path only, query strings may hold tokens)."""
     try:
@@ -330,6 +355,14 @@ async def download_direct(
                                 progress_callback(downloaded, total_size, speed, eta)
 
                 title = _guess_title(url, filename)
+                pipeline(
+                    "download.done",
+                    ticket=download_id,
+                    host=url_host(url),
+                    source="direct",
+                    bytes=downloaded,
+                    ms=int((time.monotonic() - started) * 1000),
+                )
                 return DownloadResult(
                     path=str(file_path),
                     size=downloaded,
@@ -382,6 +415,55 @@ def _safe_unlink(path: Optional[Path]) -> None:
 
 
 # --- yt-dlp -----------------------------------------------------------------
+_MAX_FILESIZE_HINTS = ("file is larger than max-filesize", "larger than max")
+_LOGIN_HINTS = ("login_required", "you've been logged out", "empty media response")
+_PRIVATE_HINTS = ("private", "sign in", "sign-in")
+_BOT_HINTS = ("not a bot", "confirm you", "confirm you're", "checkpoint")
+
+
+def classify_ytdlp_failure(message: str, *, host: str = "") -> DownloadFailed:
+    """Turn one yt-dlp error string into the most precise user-facing error.
+
+    ``MediaUnavailable`` beats ``LoginRequired`` when both apply: Instagram
+    answers private/deleted posts with the same empty response a login wall
+    gives, and telling a user to "add cookies" for a gone reel is wrong.
+    """
+    text = strip_ansi(str(message))
+    lowered = text.lower()
+    instagram = host.endswith(("instagram.com", "instagr.am", "ig.me", "cdninstagram.com"))
+
+    if any(hint in lowered for hint in _MAX_FILESIZE_HINTS):
+        return DownloadError(
+            f"This file is larger than the {format_size(MAX_BYTES)} delivery "
+            "limit. Pick a lower quality."
+        )
+    if "ffmpeg" in lowered and "not found" in lowered:
+        return DownloadError("FFmpeg is missing on the server; cannot process this media.")
+    if any(hint in lowered for hint in _LOGIN_HINTS):
+        if instagram:
+            return MediaUnavailable(
+                "Instagram didn't hand back this media. Reels download only while "
+                "they're public — private, deleted or age-restricted posts return nothing."
+            )
+        return LoginRequired(
+            "This link needs a logged-in session. Only public pages can be fetched."
+        )
+    if "login required" in lowered or "rate limit" in lowered or "rate-limit" in lowered:
+        return LoginRequired("This media needs a login, or the site is rate limiting me.")
+    if any(hint in lowered for hint in _BOT_HINTS):
+        return LoginRequired(
+            "The site is asking for a login (bot check). "
+            "Add cookies with YTDLP_COOKIES_FILE, or retry through a proxy."
+        )
+    if any(hint in lowered for hint in _PRIVATE_HINTS) or "login" in lowered:
+        return LoginRequired("This media is private or requires a login.")
+    if "unsupported url" in lowered:
+        return DownloadError("This site is not supported by the extractor.")
+    if "timed out" in lowered:
+        return DownloadError("The site took too long to respond. Try again.")
+    return DownloadError(f"Could not process this link. {text[:220]}")
+
+
 def _build_ytdlp_options(
     download_id: int,
     options: Optional[dict] = None,
@@ -471,6 +553,16 @@ async def download_with_ytdlp(
 
     ydl_opts = _build_ytdlp_options(download_id, options, progress_callback, cancel_event)
     loop = asyncio.get_running_loop()
+    host = url_host(url)
+    timer = Timer()
+    pipeline(
+        "extract.start",
+        ticket=download_id,
+        host=host,
+        format=str(ydl_opts.get("format") or "")[:60],
+        cookies=bool(ydl_opts.get("cookiefile")),
+        proxy=bool(ydl_opts.get("proxy")),
+    )
 
     def _run(opts: dict) -> dict:
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -496,6 +588,7 @@ async def download_with_ytdlp(
             # The requested quality may simply not exist for this item.
             if options and "requested format is not available" in strip_ansi(str(exc)).lower():
                 logger.info("Requested format unavailable for %s; using the default ladder.", redact_url(url))
+                pipeline("extract.retry", ticket=download_id, host=host, reason="format_unavailable")
                 _cleanup_parts(download_id)
                 info = await _extract(
                     _build_ytdlp_options(download_id, None, progress_callback, cancel_event)
@@ -504,38 +597,39 @@ async def download_with_ytdlp(
                 raise
     except DownloadCancelled:
         _cleanup_parts(download_id)
+        pipeline("extract.cancelled", ticket=download_id, host=host, ms=timer.elapsed)
         raise
     except Exception as exc:  # noqa: BLE001 - yt-dlp raises many types
         _cleanup_parts(download_id)
         message = strip_ansi(str(exc))
-        logger.error("yt-dlp failed for %s: %s", redact_url(url), message)
-
         if isinstance(exc, DownloadError):
             raise
-        lowered = message.lower()
-        if "file is larger than max-filesize" in lowered or "larger than max" in lowered:
-            raise DownloadError(
-                f"This file is larger than the {format_size(MAX_BYTES)} delivery "
-                "limit. Pick a lower quality."
-            )
-        if "ffmpeg" in lowered and "not found" in lowered:
-            raise DownloadError("FFmpeg is missing on the server; cannot process this media.")
-        if "not a bot" in lowered or "confirm you" in lowered:
-            raise DownloadError(
-                "The site is asking for a login (bot check). "
-                "Add cookies with YTDLP_COOKIES_FILE, or retry through a proxy."
-            )
-        if "private" in lowered or "login" in lowered or "sign in" in lowered:
-            raise DownloadError("This media is private or requires a login.")
-        if "unsupported url" in lowered:
-            raise DownloadError("This site is not supported by the extractor.")
-        if "timed out" in lowered:
-            raise DownloadError("The site took too long to respond. Try again.")
-        raise DownloadError(f"Could not process this link. {message[:220]}")
+        error = classify_ytdlp_failure(message, host=host)
+        logger.warning("yt-dlp failed for %s: %s", redact_url(url), message)
+        pipeline(
+            "extract.failed",
+            ticket=download_id,
+            host=host,
+            ms=timer.elapsed,
+            category=type(error).__name__,
+            reason=str(error)[:180],
+            detail=message[:180],
+            level=logging.WARNING,
+        )
+        raise error
 
+    pipeline(
+        "extract.done",
+        ticket=download_id,
+        host=host,
+        ms=timer.elapsed,
+        formats=len(info.get("formats") or []),
+        extractor=str(info.get("extractor_key") or info.get("extractor") or ""),
+    )
     expected = info.get("__expected_path")
     path = _find_output(download_id, expected)
     if path is None:
+        pipeline("file.missing", ticket=download_id, host=host, level=logging.ERROR)
         raise DownloadError("The download finished but no file was produced.")
 
     if path.stat().st_size > MAX_BYTES:
@@ -557,9 +651,19 @@ async def download_with_ytdlp(
             width = width or item.get("width")
             height = height or item.get("height")
 
+    size = path.stat().st_size
+    pipeline(
+        "download.done",
+        ticket=download_id,
+        host=host,
+        source="yt-dlp",
+        bytes=size,
+        ms=timer.elapsed,
+        resolution=f"{width}x{height}" if width and height else "",
+    )
     return DownloadResult(
         path=str(path),
-        size=path.stat().st_size,
+        size=size,
         title=(info.get("title") or path.stem)[:200],
         duration=int(duration) if duration else None,
         width=int(width) if width else None,
@@ -590,6 +694,12 @@ async def download_file(
     cancel_event: Optional[asyncio.Event] = None,
 ) -> DownloadResult:
     """Download ``url``. Media pages fall back to yt-dlp automatically."""
+    pipeline(
+        "download.dispatch",
+        ticket=download_id,
+        host=url_host(url),
+        lane="extractor" if (is_media_url(url) or ytdlp_options) else "direct",
+    )
     if is_media_url(url) or ytdlp_options:
         return await download_with_ytdlp(
             url, download_id, ytdlp_options, progress_callback, cancel_event

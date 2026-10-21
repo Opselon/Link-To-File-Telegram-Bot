@@ -13,11 +13,15 @@ from linktofile.application.container import Services
 from linktofile.config import (
     ADMIN_ID,
     BOT_DISPLAY_NAME,
+    INSTANT_HOSTS,
     JANITOR_INTERVAL,
     TEMP_FILE_TTL,
+    YTDLP_COOKIES_FILE,
+    YTDLP_PROXY,
 )
 from linktofile.infrastructure.janitor import janitor_loop
 from linktofile.infrastructure.telegram import handlers
+from linktofile.shared.telemetry import pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +80,18 @@ async def on_startup(services: Services, bot: Bot) -> None:
         logger.debug("Bot profile update skipped: %s", exc)
 
     policy = services.settings.force_join()
+    pipeline(
+        "boot",
+        version=services.version,
+        cap_mb=services.cap_mb,
+        workers=services.queue.concurrency,
+        instant=",".join(INSTANT_HOSTS),
+        cookies="yes" if YTDLP_COOKIES_FILE else "no",
+        proxy="yes" if YTDLP_PROXY else "no",
+        ytdlp=_ytdlp_version(),
+        impersonate=_impersonation(),
+        admin=ADMIN_ID or "unset",
+    )
     logger.info(
         "Ready · v%s · admin=%s · cap=%sMB · force_join=%s%s",
         services.version,
@@ -84,6 +100,26 @@ async def on_startup(services: Services, bot: Bot) -> None:
         "on" if policy.is_active else "off",
         f" · {policy.channel}" if policy.channel else "",
     )
+
+
+def _ytdlp_version() -> str:
+    """The extractor version decides whether Instagram/YouTube work at all."""
+    try:
+        from importlib.metadata import version
+
+        return version("yt-dlp")
+    except Exception:  # noqa: BLE001 - cosmetic only
+        return "unknown"
+
+
+def _impersonation() -> str:
+    """curl_cffi lets yt-dlp fake a browser TLS fingerprint when a site blocks us."""
+    try:
+        import curl_cffi  # noqa: F401
+
+        return "yes"
+    except Exception:  # noqa: BLE001 - optional dependency
+        return "no"
 
 
 async def on_shutdown(services: Services, bot: Bot) -> None:

@@ -6,6 +6,7 @@ import asyncio
 import html
 import logging
 import time
+from collections import deque
 from typing import Optional
 
 from aiogram import Bot
@@ -16,12 +17,19 @@ from linktofile.domain.errors import BotError
 from linktofile.domain.models import MediaAsset
 from linktofile.infrastructure.telegram import keyboards, texts
 from linktofile.infrastructure.telegram.upload import ProgressFSInputFile
+from linktofile.shared.telemetry import Timer, pipeline
 from linktofile.shared.utils import format_size, get_progress_bar
 
 logger = logging.getLogger(__name__)
 
 VIDEO_EXT = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 AUDIO_EXT = {".mp3", ".m4a", ".wav", ".flac", ".ogg", ".opus"}
+
+# Operator alerts are throttled per process: a burst of dead links must not turn
+# into a burst of messages. Ten per hour is plenty to notice a real outage.
+_ALERT_WINDOW = 3600.0
+_ALERT_LIMIT = 10
+_ALERT_TIMES: deque[float] = deque()
 
 
 class Card:
@@ -83,12 +91,14 @@ class TelegramDelivery:
         header: str,
         media: bool,
         card: Optional[Card] = None,
+        admin_id: Optional[int] = None,
     ) -> None:
         self._bot = bot
         self._message = message
         self._ticket = ticket_id
         self._header = header
         self._media = media
+        self._admin_id = admin_id
         self.card = card or Card(message)
 
     # --- progress (called from the engine, possibly a worker thread) --------
@@ -116,6 +126,13 @@ class TelegramDelivery:
         caption = texts.done_caption(asset)
         markup = keyboards.result_menu(self._ticket, media=self._media)
         suffix = asset.suffix
+        timer = Timer()
+        pipeline(
+            "upload.start",
+            ticket=self._ticket,
+            bytes=asset.size,
+            kind=suffix.lstrip(".") or "file",
+        )
 
         if suffix in VIDEO_EXT:
             extra = {"supports_streaming": True}
@@ -142,13 +159,45 @@ class TelegramDelivery:
                 source, caption=caption, parse_mode="HTML", reply_markup=markup
             )
         await self.card.close()
+        pipeline("upload.done", ticket=self._ticket, bytes=asset.size, ms=timer.elapsed)
 
     async def failed(self, error: BotError) -> None:
         await self.card.show(
             f"❌ <b>Couldn't finish that</b>\n\n{html.escape(str(error))}",
-            markup=keyboards.error_menu(self._ticket),
+            markup=keyboards.error_menu(self._ticket, media=self._media),
             force=True,
         )
+        pipeline(
+            "deliver.failed",
+            ticket=self._ticket,
+            category=type(error).__name__,
+            reason=str(error)[:200],
+            level=logging.WARNING,
+        )
+        await self._alert_admin(error)
+
+    async def _alert_admin(self, error: BotError) -> None:
+        """One compact line to the operator per failure, throttled.
+
+        Users only see the friendly sentence; the operator needs the ticket, the
+        site and the reason without grepping the whole log.
+        """
+        if not self._admin_id:
+            return
+        now = time.monotonic()
+        while _ALERT_TIMES and now - _ALERT_TIMES[0] > _ALERT_WINDOW:
+            _ALERT_TIMES.popleft()
+        if len(_ALERT_TIMES) >= _ALERT_LIMIT:
+            return
+        _ALERT_TIMES.append(now)
+        text = (
+            f"⚠️ <b>ticket {self._ticket}</b> failed\n"
+            f"<code>{html.escape(str(error)[:300])}</code>"
+        )
+        try:
+            await self._bot.send_message(self._admin_id, text, parse_mode="HTML")
+        except Exception as exc:  # noqa: BLE001 - an alert is never fatal
+            logger.debug("Admin alert could not be delivered: %s", exc)
 
     async def cancelled(self) -> None:
         await self.card.show(

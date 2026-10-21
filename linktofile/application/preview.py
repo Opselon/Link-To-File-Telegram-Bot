@@ -12,11 +12,20 @@ import asyncio
 import logging
 import time
 from typing import Optional
+from urllib.parse import urlparse
 
 from linktofile.domain.models import MediaInfo
 from linktofile.domain.ports import MediaProbe
+from linktofile.shared.telemetry import Timer, pipeline
 
 logger = logging.getLogger(__name__)
+
+
+def _host(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:  # pragma: no cover - defensive
+        return ""
 
 
 class PreviewService:
@@ -107,16 +116,22 @@ class PreviewService:
     # --- internals ----------------------------------------------------------
     async def _fetch(self, url: str) -> None:
         info: Optional[MediaInfo] = None
+        timer = Timer()
+        outcome = "empty"
         try:
             info = await asyncio.wait_for(self._probe.probe(url), timeout=self._timeout)
+            outcome = "ok" if info is not None else "empty"
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
+            outcome = "timeout"
             logger.debug("Preview timed out after %ss for %s", self._timeout, url)
         except Exception as exc:  # noqa: BLE001 - best effort by design
+            outcome = "error"
             logger.debug("Preview failed for %s: %s", url, exc)
         finally:
             self._inflight.pop(url, None)
+            pipeline("preview", host=_host(url), ms=timer.elapsed, outcome=outcome)
 
         if info is None:
             return
