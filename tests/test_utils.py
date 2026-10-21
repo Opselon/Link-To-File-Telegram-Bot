@@ -2,8 +2,8 @@ import time
 
 import pytest
 
-import utils
-from utils import (
+from linktofile.shared import utils
+from linktofile.shared.utils import (
     check_rate_limit,
     clean_filename,
     format_duration,

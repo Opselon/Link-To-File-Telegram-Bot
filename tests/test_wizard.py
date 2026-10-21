@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from cli.wizard import run_wizard
+from linktofile.cli.wizard import run_wizard
 
 TOKEN = "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
 

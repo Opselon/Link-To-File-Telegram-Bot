@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from core.updater import Updater, _version_tuple
+from linktofile.infrastructure.system.updater import Updater, _version_tuple
 
 
 def test_version_tuple_ordering():
@@ -14,7 +14,7 @@ def test_backup_creation(tmp_path):
     (tmp_path / ".env").write_text("TOKEN=1")
     (tmp_path / "bot_database.db").write_text("db")
 
-    with patch("core.updater.shutil.copy2") as copy:
+    with patch("linktofile.infrastructure.system.updater.shutil.copy2") as copy:
         backup_path = updater.backup_config()
 
     assert backup_path.exists()
@@ -32,7 +32,7 @@ def test_rollback_mechanism(tmp_path):
     with patch.object(Updater, "latest_release", return_value="9.9.9"), \
          patch.object(Updater, "pull_latest", return_value=False), \
          patch.object(Updater, "backup_config", return_value=backup_dir), \
-         patch("core.updater.shutil.copy2") as copy:
+         patch("linktofile.infrastructure.system.updater.shutil.copy2") as copy:
         ok = updater.run_update()
 
     assert ok is False
@@ -40,7 +40,7 @@ def test_rollback_mechanism(tmp_path):
 
 
 def test_up_to_date_short_circuits(tmp_path):
-    from core.version import VERSION
+    from linktofile.infrastructure.system.version import VERSION
 
     updater = Updater()
     updater.base_dir = tmp_path

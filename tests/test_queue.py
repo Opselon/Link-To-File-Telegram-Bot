@@ -1,144 +1,140 @@
+"""Queue: bounded, fair, and cancellable — including while blocked on I/O."""
+
 import asyncio
 
 import pytest
 
-from queue_manager import DownloadQueue, QueueFull
+from linktofile.application.queue import DownloadQueue
+from linktofile.domain.errors import QueueSaturated
 
 
-@pytest.mark.asyncio
-async def test_queue_processing():
+async def test_jobs_run_in_order():
     queue = DownloadQueue(concurrency=1)
     queue.start()
+    seen: list[int] = []
 
-    results = []
+    async def job(value):
+        await asyncio.sleep(0.01)
+        seen.append(value)
 
-    async def task(value):
-        await asyncio.sleep(0.05)
-        results.append(value)
-
-    await queue.add_task(task, 1)
-    await queue.add_task(task, 2)
-    await queue.queue.join()
-
-    assert results == [1, 2]
+    await queue.submit(job, 1)
+    await queue.submit(job, 2)
+    await queue.drain(timeout=5)
+    assert seen == [1, 2]
     await queue.stop()
 
 
-@pytest.mark.asyncio
-async def test_queue_runs_jobs_in_parallel():
-    queue = DownloadQueue(concurrency=3)
-    queue.start()
-
-    running = 0
-    peak = 0
-
-    async def task():
-        nonlocal running, peak
-        running += 1
-        peak = max(peak, running)
-        await asyncio.sleep(0.15)
-        running -= 1
-
-    for _ in range(3):
-        await queue.add_task(task)
-    await queue.queue.join()
-    await queue.stop()
-
-    assert peak == 3
-
-
-@pytest.mark.asyncio
 async def test_queue_is_bounded():
-    queue = DownloadQueue(concurrency=1, max_size=1)  # no workers: nothing drains
+    queue = DownloadQueue(concurrency=1, max_size=1)
+    # Not started: nothing drains, so the second submit must be refused.
+
+    async def job():
+        return None
+
+    await queue.submit(job)
+    with pytest.raises(QueueSaturated):
+        await queue.submit(job)
+
+
+async def test_per_user_limit_refuses_the_third_job():
+    queue = DownloadQueue(concurrency=1, per_user_limit=2, max_size=10)
+
+    async def job():
+        return None
+
+    await queue.submit(job, user_id=5)
+    await queue.submit(job, user_id=5)
+    with pytest.raises(QueueSaturated):
+        await queue.submit(job, user_id=5)
+    # Another user is unaffected.
+    await queue.submit(job, user_id=6)
+
+
+async def test_snapshot_reports_load():
+    queue = DownloadQueue(concurrency=1)
+    queue.start()
+    blocker = asyncio.Event()
+    started = asyncio.Event()
 
     async def slow():
-        await asyncio.sleep(0.2)
+        started.set()
+        await blocker.wait()
 
-    await queue.add_task(slow)
-    with pytest.raises(QueueFull):
-        await queue.add_task(slow)
+    await queue.submit(slow, user_id=9, key=1)
+    await asyncio.wait_for(started.wait(), 2)
+    snapshot = queue.snapshot()
+    assert snapshot.active == 1
+    assert queue.load(9) == 1
+    assert queue.is_running(1)
 
-
-@pytest.mark.asyncio
-async def test_timeout_does_not_kill_the_worker(monkeypatch):
-    import queue_manager
-
-    monkeypatch.setattr(queue_manager, "QUEUE_TASK_TIMEOUT", 0.05)
-    queue = DownloadQueue(concurrency=1)
-    queue.start()
-
-    async def slow_task():
-        await asyncio.sleep(2)
-
-    done = []
-
-    async def quick_task():
-        done.append(True)
-
-    await queue.add_task(slow_task)
-    await queue.add_task(quick_task)
-    await asyncio.wait_for(queue.queue.join(), timeout=5)
+    blocker.set()
+    await queue.drain(timeout=5)
+    assert queue.load(9) == 0
     await queue.stop()
 
-    assert done == [True]
 
-
-@pytest.mark.asyncio
-async def test_stop_cancels_workers():
-    queue = DownloadQueue(concurrency=2)
-    queue.start()
-    assert len(queue.workers) == 2
-    await queue.stop()
-    assert queue.workers == []
-
-
-@pytest.mark.asyncio
 async def test_cancel_interrupts_a_blocked_job():
-    """A job stuck on I/O must stop at once, not at the next progress tick."""
-    import asyncio
-
-    from queue_manager import DownloadQueue
-
     queue = DownloadQueue(concurrency=1)
     queue.start()
     started = asyncio.Event()
-    cleaned = asyncio.Event()
+    finished = asyncio.Event()
 
-    async def stuck_job():
+    async def stuck():
         started.set()
         try:
-            await asyncio.sleep(3600)      # stands in for a stalled socket
+            await asyncio.sleep(30)  # stands in for a hung socket
         finally:
-            cleaned.set()
+            finished.set()
 
-    try:
-        await queue.add_task(stuck_job, job_key=99)
-        await asyncio.wait_for(started.wait(), timeout=2)
-        assert queue.cancel(99) is True
-        await asyncio.wait_for(cleaned.wait(), timeout=2)
-        # the worker survived and can take the next job
-        ran = asyncio.Event()
+    await queue.submit(stuck, key=42)
+    await asyncio.wait_for(started.wait(), 2)
 
-        async def quick():
-            ran.set()
-
-        await queue.add_task(quick, job_key=100)
-        await asyncio.wait_for(ran.wait(), timeout=2)
-    finally:
-        await queue.stop()
+    assert queue.cancel(42) is True
+    await asyncio.wait_for(finished.wait(), 2)
+    await queue.drain(timeout=5)
+    assert not queue.is_running(42)
+    await queue.stop()
 
 
-@pytest.mark.asyncio
-async def test_cancel_marks_queued_job_before_it_starts():
-    import asyncio
+async def test_cancel_while_queued_skips_execution():
+    queue = DownloadQueue(concurrency=1)
+    queue.start()
+    ran: list[str] = []
+    blocker = asyncio.Event()
+    started = asyncio.Event()
 
-    from queue_manager import DownloadQueue
+    async def first():
+        started.set()
+        await blocker.wait()
 
-    queue = DownloadQueue(concurrency=1)   # not started: nothing runs yet
+    async def second():
+        ran.append("second")
 
-    async def job():
-        await asyncio.sleep(0)
+    await queue.submit(first, key=1)
+    await asyncio.wait_for(started.wait(), 2)
+    await queue.submit(second, key=2)
 
-    await queue.add_task(job, job_key=7)
-    assert queue.cancel(7) is True
-    assert queue.cancel(12345) is False
+    assert queue.cancel(2) is True
+    blocker.set()
+    await queue.drain(timeout=5)
+
+    assert ran == []
+    await queue.stop()
+
+
+async def test_a_failing_job_does_not_kill_the_worker():
+    queue = DownloadQueue(concurrency=1)
+    queue.start()
+    done: list[int] = []
+
+    async def boom():
+        raise RuntimeError("upstream broke")
+
+    async def ok():
+        done.append(1)
+
+    await queue.submit(boom)
+    await queue.submit(ok)
+    await queue.drain(timeout=5)
+    assert done == [1]
+    await queue.stop()

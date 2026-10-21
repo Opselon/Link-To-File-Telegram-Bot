@@ -1,6 +1,6 @@
 name: Release
 
-# Bump core/version.py on main -> a tag, a GitHub release with source archives,
+# Bump linktofile/infrastructure/system/version.py on main -> a tag, a GitHub release with source archives,
 # and a multi-arch container image are produced automatically.
 on:
   push:
@@ -37,7 +37,7 @@ jobs:
           set -euo pipefail
           version=$(python - <<'PY'
           import re, pathlib
-          text = pathlib.Path("core/version.py").read_text()
+          text = pathlib.Path("linktofile/infrastructure/system/version.py").read_text()
           print(re.search(r'"([0-9]+\.[0-9]+\.[0-9]+)"', text).group(1))
           PY
           )

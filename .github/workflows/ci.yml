@@ -40,7 +40,7 @@ jobs:
         run: PYTHONPATH=. pytest -q
 
       - name: Import smoke test
-        run: python -c "import main, bot, downloader, db, ui, queue_manager; print('imports ok')"
+        run: python -c "import main; from linktofile.bootstrap import build_application; print('imports ok')"
 
   docker:
     runs-on: ubuntu-latest

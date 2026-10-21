@@ -57,13 +57,16 @@ Docker: [get.docker.com](https://get.docker.com) · ffmpeg: `sudo apt install ff
 | 🔁 **Recovery** | Retry / change quality / download again right on the result card |
 | 🛡 **Safety** | SSRF guard, per-user rate limit, hard size caps, temporary files deleted after upload |
 
-### What changed in v2
+### What's new in v3 — clean architecture
 
-- **Every button is styled.** Native Telegram button colours (`primary` / `success` / `danger`) on the main menu, quality picker, progress, error, stats and help cards — no unstyled leftovers.
-- **Faster.** 3 parallel download workers, one pooled keep-alive HTTP session, 256 KB streaming chunks, 8 concurrent yt-dlp fragments, throttled progress edits, WAL SQLite.
-- **Lighter.** `yt-dlp` is imported lazily (startup and idle RAM stay small), test tooling moved out of runtime deps, non-root multi-arch image with a built-in health check.
-- **Smarter.** A web page that isn't a file is handed to yt-dlp automatically; private/oversized media fails with a clear message instead of a stack trace.
-- **Easier to run.** One-line installer, `docker compose up`, setup wizard, `--check` preflight, automatic GitHub releases with source archives and a published container image.
+v3 is a full rewrite of the internals with the same UX, plus the features below.
+
+- **Layered codebase (Clean Architecture + DDD + SOLID).** `domain/` holds pure rules (models, policies, ports, errors) with no Telegram or SQLite imports; `application/` holds use cases that only talk to ports; `infrastructure/` implements those ports (SQLite, yt-dlp engine, aiogram surface); `bootstrap.py` is the single composition root. Every dependency points inward.
+- **Real state machine.** Typed FSM states, typed callback payloads (`QualityCB`, `TicketCB`, `Nav`, `AdminCB`) and a ticket lifecycle that refuses illegal transitions.
+- **Buttons with a way back on every screen.** Same native `primary` / `success` / `danger` styling, now with `⬅️ Back` / `🏠 Menu` / `✖️ Close` everywhere.
+- **Force-join gate with an admin dashboard.** `/admin` → toggle the gate, set the channel, clear the membership cache. Membership checks are cached for 60 s; an API outage fails open instead of locking everyone out.
+- **Instant cancel — for real.** Each job runs in its own `asyncio.Task`, so cancelling interrupts a hung socket instead of waiting for the next chunk. Queued jobs are skipped, not executed.
+- **Smaller surface, fewer footguns.** One workflow class owns guard → download → upload → delete, and files are deleted in `finally` no matter how the job ends.
 
 ---
 
@@ -78,7 +81,13 @@ Docker: [get.docker.com](https://get.docker.com) · ffmpeg: `sudo apt install ff
 | `/id` | Your Telegram ID / chat ID |
 | `/version` | Bot version + latest release link |
 
-Admins (`ADMIN_ID`) get an extra **🛠 Admin panel** button: users, downloads today, queue load, uptime, disk space.
+Admins (`ADMIN_ID`) get **🛠 Admin dashboard** (`/admin`): users, downloads today, queue load, disk space, plus the force-join controls.
+
+### Force join
+
+`/admin` → **📢 Channel** → send `@yourchannel` (the bot must be an admin there) → toggle **🔒 Force join: ON**.
+
+From then on, links and quality picks are refused until the user joins; the bot shows a **Join channel** button and an **I joined** check. Everything is stored in SQLite, so it survives restarts and updates — no env change needed.
 
 ---
 
@@ -132,7 +141,7 @@ The cloud Bot API caps bot uploads at **50 MB**. To send up to 2 GB, run a [loca
 
 ## Releases
 
-Releases are automated. Bumping `core/version.py` on `main` (or pushing a `v*` tag) makes the **Release** workflow:
+Releases are automated. Bumping `linktofile/infrastructure/system/version.py` on `main` (or pushing a `v*` tag) makes the **Release** workflow:
 
 1. run the test suite,
 2. create the git tag,
@@ -155,16 +164,29 @@ python main.py --check     # token, ffmpeg, storage
 ```
 
 ```
-bot.py            handlers, cards, job lifecycle
-ui.py             every text + keyboard (single source of styling truth)
-downloader.py     streaming HTTP + yt-dlp, cancel/retry, size caps
-queue_manager.py  bounded queue with N workers
-upload_utils.py   upload progress stream
-db.py             SQLite (WAL)
-config.py         env parsing with clamps
-cli/wizard.py     setup wizard
-core/updater.py   self-update for git installs
-scripts/healthcheck.py  container health probe
+linktofile/
+├── domain/                 pure rules — no I/O
+│   ├── models.py           DownloadTicket, Quality, MediaAsset, ForceJoinPolicy
+│   ├── policies.py         delivery cap + yt-dlp format policy
+│   ├── ports.py            Protocols the outside world must satisfy
+│   └── errors.py           BotError hierarchy
+├── application/            use cases
+│   ├── downloads.py        guard → fetch → deliver → clean up
+│   ├── queue.py            bounded queue, N workers, instant cancel
+│   ├── settings.py         force-join settings + access gate
+│   └── active.py           live ticket registry
+├── infrastructure/
+│   ├── persistence/        SQLite adapters (WAL)
+│   ├── download/           streaming engine + yt-dlp adapter
+│   ├── telegram/           handlers, keyboards, texts, delivery, callbacks
+│   ├── membership.py       channel membership checks (cached)
+│   ├── janitor.py          orphan sweep
+│   └── system/             version + self-update
+├── cli/wizard.py           setup wizard
+├── shared/utils.py         URL/SSRF/formatting helpers
+└── bootstrap.py            composition root (the only place things are wired)
+main.py                     CLI + polling loop
+scripts/healthcheck.py      container health probe
 ```
 
 Pull requests are welcome — keep `ruff check --select E9,F .` and `pytest` green.
@@ -185,6 +207,7 @@ curl -fsSL https://raw.githubusercontent.com/Opselon/Link-To-File-Telegram-Bot/m
 - نصب با داکر: `docker compose up -d`
 - اجرا بدون داکر: `python main.py --setup` و سپس `python main.py`
 - برای فایل‌های بالای ۵۰ مگابایت به یک سرور محلی Bot API نیاز دارید (`TELEGRAM_API_URL`).
+- **جوین اجباری کانال:** پنل ادمین `/admin` → 📢 Channel → آیدی کانال را بفرستید → 🔒 Force join: ON. از آن پس کاربران باید عضو شوند تا ربات برایشان کار کند (مدل ۳ با معماری تمیز، دکمهٔ برگشت روی همهٔ صفحات و cancel بی‌درنگ).
 
 ---
 
