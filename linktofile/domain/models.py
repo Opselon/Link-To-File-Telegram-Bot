@@ -135,6 +135,28 @@ _TRANSITIONS: dict[DownloadStatus, set[DownloadStatus]] = {
 
 
 @dataclass(frozen=True, slots=True)
+class MediaInfo:
+    """Metadata shown on the preview card, before a single byte is downloaded.
+
+    Pure data: the probe fills it in, the Telegram surface renders it, and the
+    quality picker is attached underneath. A failed probe simply yields ``None``.
+    """
+
+    title: str
+    uploader: Optional[str] = None
+    duration: Optional[int] = None
+    thumbnail: Optional[str] = None
+    site: str = ""
+    url: str = ""
+    view_count: Optional[int] = None
+
+    @property
+    def has_thumbnail(self) -> bool:
+        """Telegram only accepts http(s) URLs as a photo source."""
+        return bool(self.thumbnail and self.thumbnail.startswith(("http://", "https://")))
+
+
+@dataclass(frozen=True, slots=True)
 class ForceJoinPolicy:
     """Global join gate, editable from the admin dashboard."""
 

@@ -87,6 +87,12 @@ class SqliteUsers:
             row = conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()
             return int(row["n"]) if row else 0
 
+    def ids(self) -> list[int]:
+        """Every known user, oldest first (broadcast fan-out)."""
+        with self._db.connect() as conn:
+            rows = conn.execute("SELECT telegram_id FROM users ORDER BY id").fetchall()
+        return [int(row["telegram_id"]) for row in rows]
+
 
 class SqliteTickets:
     def __init__(self, database: Database) -> None:
@@ -137,6 +143,27 @@ class SqliteTickets:
         with self._db.connect() as conn:
             row = conn.execute("SELECT user_id FROM downloads WHERE id = ?", (ticket_id,)).fetchone()
         return int(row["user_id"]) if row else None
+
+    def reap_stale(self) -> int:
+        """Mark jobs left running by a previous process as failed.
+
+        The queue is in memory, so a restart (or a crash) strands any ticket in
+        ``pending``/``downloading``/``uploading`` forever: it never reaches a
+        terminal state, so stats and history lie. Called once at startup.
+        """
+        with self._db.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE downloads SET status = ?"
+                " WHERE status IN (?, ?, ?)",
+                (
+                    DownloadStatus.FAILED.value,
+                    DownloadStatus.PENDING.value,
+                    DownloadStatus.DOWNLOADING.value,
+                    DownloadStatus.UPLOADING.value,
+                ),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
 
 
 class SqliteSettings:

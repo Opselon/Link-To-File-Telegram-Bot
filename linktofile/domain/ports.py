@@ -9,6 +9,7 @@ from linktofile.domain.models import (
     DownloadStatus,
     DownloadTicket,
     MediaAsset,
+    MediaInfo,
     Quality,
 )
 
@@ -26,6 +27,13 @@ class DownloadEngine(Protocol):
     ) -> MediaAsset: ...
 
     async def close(self) -> None: ...
+
+
+@runtime_checkable
+class MediaProbe(Protocol):
+    """Reads a media page's metadata without downloading the payload."""
+
+    async def probe(self, url: str) -> Optional[MediaInfo]: ...
 
 
 @runtime_checkable

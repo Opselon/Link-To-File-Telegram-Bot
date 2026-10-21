@@ -192,6 +192,15 @@ def is_media_url(url: str) -> bool:
     return any(host == candidate or host.endswith("." + candidate) for candidate in MEDIA_HOSTS)
 
 
+def is_media_site(url: str) -> bool:
+    """True only for a known *site* (not a URL that merely ends in .mp4).
+
+    Direct file links should go straight to the downloader — probing them with
+    an extractor would just burn the preview timeout.
+    """
+    return is_media_url(url)
+
+
 def redact_url(url: str) -> str:
     """Log-friendly URL (host + path only, query strings may hold tokens)."""
     try:
