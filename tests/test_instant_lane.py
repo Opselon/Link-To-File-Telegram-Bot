@@ -25,11 +25,13 @@ from linktofile.domain.errors import BotError, LoginRequired, MediaUnavailable
 from linktofile.domain.errors import DownloadCancelled as DomainCancelled
 from linktofile.domain.models import Quality
 from linktofile.domain.policies import FormatPolicy
+import linktofile.infrastructure.download.engine as engine_module
 from linktofile.infrastructure.download.engine import (
     DownloadCancelled,
     DownloadError,
     classify_ytdlp_failure,
     is_instant_url,
+    proxy_for,
 )
 from linktofile.infrastructure.persistence.sqlite import (
     SqliteSettings,
@@ -228,6 +230,33 @@ def test_short_video_links_are_instant(url):
 )
 def test_long_form_links_keep_the_picker(url):
     assert not is_instant_url(url)
+
+
+def test_instant_hosts_bypass_the_shared_proxy(monkeypatch):
+    """The shared proxy exists for YouTube's bot check; Instagram is faster direct."""
+    monkeypatch.setattr(engine_module, "YTDLP_PROXY", "socks5://127.0.0.1:9050")
+    monkeypatch.setattr(engine_module, "INSTANT_PROXY", None)
+
+    assert proxy_for(IG_REEL) is None
+    assert proxy_for("https://youtu.be/dQw4w9WgXcQ") == "socks5://127.0.0.1:9050"
+
+
+def test_instant_options_carry_no_proxy(monkeypatch):
+    monkeypatch.setattr(engine_module, "YTDLP_PROXY", "socks5://127.0.0.1:9050")
+    monkeypatch.setattr(engine_module, "INSTANT_PROXY", None)
+
+    assert "proxy" not in engine_module._build_ytdlp_options(1, url=IG_REEL)
+    assert (
+        engine_module._build_ytdlp_options(1, url="https://youtu.be/x")["proxy"]
+        == "socks5://127.0.0.1:9050"
+    )
+
+
+def test_an_explicit_instant_proxy_is_honoured(monkeypatch):
+    monkeypatch.setattr(engine_module, "YTDLP_PROXY", "socks5://127.0.0.1:9050")
+    monkeypatch.setattr(engine_module, "INSTANT_PROXY", "http://127.0.0.1:3128")
+
+    assert proxy_for(IG_REEL) == "http://127.0.0.1:3128"
 
 
 async def test_an_instagram_link_is_queued_without_a_picker(services):

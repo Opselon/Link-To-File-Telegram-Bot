@@ -105,6 +105,10 @@ PROXY_URL = _text("PROXY_URL") or None
 # Media-only proxy: keep direct file downloads on the fast path while routing
 # yt-dlp through something that can reach YouTube. Defaults to PROXY_URL.
 YTDLP_PROXY = _text("YTDLP_PROXY") or PROXY_URL
+# Instant-lane sites (Instagram & co) are often *blocked* by proxy exits and are
+# several times faster without one. Empty = fetch them directly; set a value to
+# force those hosts through a specific proxy.
+INSTANT_PROXY = _text("INSTANT_PROXY") or None
 # Netscape cookies.txt exported from a logged-in browser (fixes YouTube bot checks).
 YTDLP_COOKIES_FILE = _text("YTDLP_COOKIES_FILE") or None
 

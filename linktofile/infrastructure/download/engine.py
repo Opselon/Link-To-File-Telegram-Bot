@@ -20,6 +20,7 @@ from linktofile.config import (
     DOWNLOADS_DIR,
     HTTP_POOL_SIZE,
     INSTANT_HOSTS,
+    INSTANT_PROXY,
     UPLOAD_LIMIT_BYTES,
     PROXY_URL,
     YTDLP_CACHE_DIR,
@@ -224,6 +225,18 @@ def is_instant_url(url: str) -> bool:
     if not host:
         return False
     return any(host == candidate or host.endswith("." + candidate) for candidate in INSTANT_HOSTS)
+
+
+def proxy_for(url: str) -> Optional[str]:
+    """Egress for ``url``: instant hosts go direct unless INSTANT_PROXY is set.
+
+    The shared YTDLP_PROXY exists for sites that block this server (YouTube's
+    bot check). Routing Instagram through it costs seconds and some exits are
+    refused outright, so those hosts use their own setting.
+    """
+    if is_instant_url(url):
+        return INSTANT_PROXY
+    return YTDLP_PROXY
 
 
 def redact_url(url: str) -> str:
@@ -469,6 +482,8 @@ def _build_ytdlp_options(
     options: Optional[dict] = None,
     progress_callback: Optional[Callable] = None,
     cancel_event: Optional[asyncio.Event] = None,
+    *,
+    url: str = "",
 ) -> dict:
     ydl_opts: dict[str, Any] = {
         "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
@@ -492,8 +507,9 @@ def _build_ytdlp_options(
             "Accept-Language": "en-US,en;q=0.9",
         },
     }
-    if YTDLP_PROXY:
-        ydl_opts["proxy"] = YTDLP_PROXY
+    proxy = proxy_for(url)
+    if proxy:
+        ydl_opts["proxy"] = proxy
     if YTDLP_COOKIES_FILE and os.path.exists(YTDLP_COOKIES_FILE):
         ydl_opts["cookiefile"] = YTDLP_COOKIES_FILE
     if options:
@@ -551,7 +567,9 @@ async def download_with_ytdlp(
             "Media extraction is unavailable on this server (yt-dlp missing)."
         ) from exc
 
-    ydl_opts = _build_ytdlp_options(download_id, options, progress_callback, cancel_event)
+    ydl_opts = _build_ytdlp_options(
+        download_id, options, progress_callback, cancel_event, url=url
+    )
     loop = asyncio.get_running_loop()
     host = url_host(url)
     timer = Timer()
@@ -591,7 +609,9 @@ async def download_with_ytdlp(
                 pipeline("extract.retry", ticket=download_id, host=host, reason="format_unavailable")
                 _cleanup_parts(download_id)
                 info = await _extract(
-                    _build_ytdlp_options(download_id, None, progress_callback, cancel_event)
+                    _build_ytdlp_options(
+                        download_id, None, progress_callback, cancel_event, url=url
+                    )
                 )
             else:
                 raise
