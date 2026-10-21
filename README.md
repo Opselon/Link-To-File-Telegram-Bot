@@ -59,7 +59,7 @@ Docker: [get.docker.com](https://get.docker.com) · ffmpeg: `sudo apt install ff
 
 ### What's new in v3.1 — smart preview & history
 
-- **Smart media preview.** Send a YouTube/Instagram/TikTok link and the bot now shows the title, uploader, duration and thumbnail in a photo card *before* the quality picker — one `extract_info` pass, cached per URL, with a hard deadline (`PREVIEW_TIMEOUT`, 0 disables it). A slow or unsupported site quietly degrades to the plain picker, so nothing ever gets slower.
+- **Smart media preview.** Send a YouTube/Instagram/TikTok link and the bot now shows the title, uploader, duration and thumbnail in a photo card *before* the quality picker — one `extract_info` pass, cached per URL, with a hard deadline (`PREVIEW_TIMEOUT`, 0 disables it). The picker only waits `PREVIEW_WAIT` seconds for it: a slow site gets the plain picker immediately while the probe finishes in the background and fills the cache, so nothing ever gets slower.
 - **Remembered quality.** The quality you pick is stored per user; next time you send a media link the picker opens with **⚡ My usual · 720p** on top. One tap to use it, **↺ Reset** to forget.
 - **Download history.** `/history` (and a **🕘 History** button on the main menu) lists your last 8 downloads with status and size; tap any row to fetch it again.
 - **Admin broadcast.** `/admin` → **📣 Broadcast** → send a message → see exactly what users will get → confirm. The fan-out respects flood control, skips blocked/deleted chats, and reports back with a delivered/failed summary.
@@ -119,6 +119,7 @@ All settings are environment variables (`.env` is read automatically). Only the 
 | `QUEUE_MAX_SIZE` | `200` | Waiting jobs before the bot says "busy" |
 | `RATE_LIMIT_SECONDS` | `3` | Per-user cooldown |
 | `PREVIEW_TIMEOUT` | `12` | Seconds a media page may take to describe itself; `0` disables the preview card |
+| `PREVIEW_WAIT` | `5` | Seconds the quality picker waits for that preview before showing up without it |
 | `DOWNLOAD_CHUNK_KB` | `256` | Streaming chunk size |
 | `UPLOAD_CHUNK_KB` | `1024` | Upload chunk size |
 | `YTDLP_FRAGMENTS` | `8` | Concurrent media fragments |

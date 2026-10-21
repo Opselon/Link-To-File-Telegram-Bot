@@ -1,9 +1,9 @@
-"""Preview metadata with a cache and a hard deadline.
+"""Preview metadata with a cache, a fast budget and a hard deadline.
 
 A media page is probed once, then the card is rebuilt for free from the cache.
-The probe is best-effort by design: a slow or broken site must never delay a
-download, so a timeout or error degrades to ``None`` and the caller falls back
-to the plain quality picker.
+A probe is shared between callers and never cancelled by a short wait: if the
+site is slow the picker appears right away and the probe keeps running in the
+background, so the next link that needs it is instant.
 """
 
 from __future__ import annotations
@@ -25,53 +25,103 @@ class PreviewService:
         probe: MediaProbe,
         *,
         timeout: float = 12.0,
+        wait: float = 5.0,
         ttl: float = 300.0,
         capacity: int = 2_000,
     ) -> None:
         self._probe = probe
         # timeout <= 0 disables previews entirely (no probe, no delay)
         self._timeout = float(timeout)
+        self._wait = max(0.0, float(wait))
         self._ttl = max(0.0, float(ttl))
         self._capacity = max(1, int(capacity))
         self._cache: dict[str, tuple[MediaInfo, float]] = {}
+        self._inflight: dict[str, asyncio.Task] = {}
 
+    # --- introspection ------------------------------------------------------
     @property
     def cache_size(self) -> int:
         return len(self._cache)
 
-    async def describe(self, url: str) -> Optional[MediaInfo]:
-        """Return metadata for ``url``, or ``None`` when it cannot be read in time."""
+    @property
+    def inflight(self) -> int:
+        return len(self._inflight)
+
+    def cached(self, url: str) -> Optional[MediaInfo]:
+        entry = self._cache.get(url)
+        if entry is None:
+            return None
+        info, stamp = entry
+        if time.monotonic() - stamp >= self._ttl:
+            self._cache.pop(url, None)
+            return None
+        return info
+
+    # --- public API ---------------------------------------------------------
+    async def describe(self, url: str, *, wait: Optional[float] = None) -> Optional[MediaInfo]:
+        """Metadata for ``url`` if it can be read within the wait budget.
+
+        ``None`` means "render the plain picker"; the probe may still be
+        running and will fill the cache for the next request.
+        """
         if self._timeout <= 0:
             return None
 
-        cached = self._cache.get(url)
-        now = time.monotonic()
-        if cached is not None and now - cached[1] < self._ttl:
-            return cached[0]
+        hit = self.cached(url)
+        if hit is not None:
+            return hit
 
+        task = self._inflight.get(url)
+        if task is None or task.done():
+            task = asyncio.create_task(self._fetch(url), name="preview-fetch")
+            self._inflight[url] = task
+
+        budget = self._wait if wait is None else max(0.0, float(wait))
         try:
-            info = await asyncio.wait_for(self._probe.probe(url), timeout=self._timeout)
+            # shield: a short wait must not cancel the probe that warms the cache
+            await asyncio.wait_for(asyncio.shield(task), timeout=budget)
         except asyncio.TimeoutError:
-            logger.debug("Preview timed out after %ss for %s", self._timeout, url)
+            logger.debug("Preview still running for %s; falling back", url)
             return None
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - a preview is never a hard failure
             logger.debug("Preview failed for %s: %s", url, exc)
             return None
+        return self.cached(url)
 
-        if info is None:
-            return None
-
-        self._cache[url] = (info, time.monotonic())
-        self._prune()
-        return info
+    def warm(self, url: str) -> None:
+        """Start a probe now without waiting for it (cache warming)."""
+        if self._timeout <= 0 or self.cached(url) is not None:
+            return
+        task = self._inflight.get(url)
+        if task is None or task.done():
+            self._inflight[url] = asyncio.create_task(self._fetch(url), name="preview-warm")
 
     def forget(self, url: Optional[str] = None) -> None:
         if url is None:
             self._cache.clear()
         else:
             self._cache.pop(url, None)
+
+    # --- internals ----------------------------------------------------------
+    async def _fetch(self, url: str) -> None:
+        info: Optional[MediaInfo] = None
+        try:
+            info = await asyncio.wait_for(self._probe.probe(url), timeout=self._timeout)
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            logger.debug("Preview timed out after %ss for %s", self._timeout, url)
+        except Exception as exc:  # noqa: BLE001 - best effort by design
+            logger.debug("Preview failed for %s: %s", url, exc)
+        finally:
+            self._inflight.pop(url, None)
+
+        if info is None:
+            return
+        self._cache[url] = (info, time.monotonic())
+        self._prune()
 
     def _prune(self) -> None:
         """Keep the cache bounded: expired entries first, then the oldest."""

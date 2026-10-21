@@ -54,12 +54,40 @@ async def test_describe_probes_once_then_serves_from_cache():
     assert service.cache_size == 1
 
 
-async def test_describe_gives_up_on_a_slow_probe():
-    service = PreviewService(FakeProbe(INFO, delay=2), timeout=0.05, ttl=60)
+async def test_a_slow_probe_does_not_block_the_picker_and_warms_the_cache():
+    probe = FakeProbe(INFO, delay=0.3)
+    service = PreviewService(probe, timeout=5, wait=0.05, ttl=60)
 
     started = time.monotonic()
     assert await service.describe("https://youtu.be/x") is None
     assert time.monotonic() - started < 1.0
+
+    # The probe was not cancelled: it fills the cache for the next link.
+    await asyncio.sleep(0.45)
+    assert probe.calls == 1
+    assert await service.describe("https://youtu.be/x") == INFO
+
+
+async def test_simultaneous_describes_share_one_probe():
+    probe = FakeProbe(INFO, delay=0.05)
+    service = PreviewService(probe, timeout=5, wait=1, ttl=60)
+
+    results = await asyncio.gather(
+        service.describe("https://youtu.be/x"),
+        service.describe("https://youtu.be/x"),
+    )
+
+    assert results == [INFO, INFO]
+    assert probe.calls == 1
+
+
+async def test_warm_fills_the_cache_without_blocking():
+    probe = FakeProbe(INFO, delay=0.05)
+    service = PreviewService(probe, timeout=5, wait=1, ttl=60)
+
+    service.warm("https://youtu.be/x")
+    assert await service.describe("https://youtu.be/x") == INFO
+    assert probe.calls == 1
 
 
 async def test_describe_survives_a_failing_probe():
