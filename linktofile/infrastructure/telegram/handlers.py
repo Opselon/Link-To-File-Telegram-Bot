@@ -16,9 +16,21 @@ from aiogram.types import CallbackQuery, Message
 
 from linktofile.application.container import Services
 from linktofile.application.downloads import DownloadJob
-from linktofile.domain.errors import QueueSaturated
-from linktofile.domain.models import DownloadTicket, MediaInfo, Quality, QualityKind
+from linktofile.domain.errors import (
+    DuplicateJob,
+    InvalidUrl,
+    QueueSaturated,
+    UnsafeUrl,
+)
+from linktofile.domain.models import (
+    DownloadTicket,
+    FailureKind,
+    MediaInfo,
+    Quality,
+    QualityKind,
+)
 from linktofile.infrastructure.download.engine import is_instant_url, is_media_site, url_host
+from linktofile.infrastructure.system.metrics import directory_bytes, rss_mb, uptime_text
 from linktofile.infrastructure.telegram import keyboards, texts
 from linktofile.infrastructure.telegram.callbacks import (
     AdminCB,
@@ -29,8 +41,9 @@ from linktofile.infrastructure.telegram.callbacks import (
 )
 from linktofile.infrastructure.telegram.delivery import TelegramDelivery
 from linktofile.infrastructure.telegram.states import AdminFlow
+from linktofile.shared.security import ensure_public_url
 from linktofile.shared.telemetry import pipeline
-from linktofile.shared.utils import is_media_url, is_safe_url, is_valid_url
+from linktofile.shared.utils import format_size, is_media_url, is_safe_url, is_valid_url
 
 logger = logging.getLogger(__name__)
 router = Router(name="core")
@@ -129,6 +142,24 @@ async def _enqueue(
     note: Optional[str] = None,
 ) -> bool:
     header = header or _header(quality)
+    # Durable first: the row becomes 'queued' with its quality committed before
+    # the job exists in memory, so a crash here is recoverable, and the partial
+    # unique index rejects a second live job for the same (user, url).
+    try:
+        services.tickets.enqueue(ticket.id, quality)
+    except DuplicateJob:
+        services.tickets.fail(
+            ticket.id, kind=FailureKind.DUPLICATE, error="Duplicate link."
+        )
+        existing = services.tickets.active_duplicate(ticket.user_id, ticket.url)
+        await message.answer(
+            texts.duplicate_text(existing.id if existing else ticket.id),
+            parse_mode="HTML",
+            reply_markup=keyboards.progress_menu(existing.id if existing else ticket.id),
+        )
+        pipeline("link.duplicate", ticket=ticket.id, user=ticket.user_id, host=url_host(ticket.url))
+        return False
+
     delivery = TelegramDelivery(
         services.bot,
         message,
@@ -150,8 +181,11 @@ async def _enqueue(
 
     try:
         position = await services.queue.submit(run, key=ticket.id, user_id=ticket.user_id)
-    except QueueSaturated:
+    except (QueueSaturated, DuplicateJob):
         services.active.close(ticket.id)
+        services.tickets.fail(
+            ticket.id, kind=FailureKind.QUEUE_FULL, error="Not enough queue capacity."
+        )
         await message.answer(
             texts.too_many_jobs_text() if services.queue.load(ticket.user_id)
             else texts.queue_full_text(),
@@ -228,6 +262,7 @@ async def cmd_cancel(message: Message, services: Services) -> None:
         return
     for ticket_id in live:
         services.queue.cancel(ticket_id)
+        services.tickets.cancel(ticket_id)
         event = services.active.event(ticket_id)
         if event:
             event.set()
@@ -263,6 +298,17 @@ async def on_text(message: Message, services: Services) -> None:
         pipeline("link.rejected", user=user_id, host=host, reason="unsafe")
         await message.answer(texts.blocked_url_text(), parse_mode="HTML")
         return
+    # Second SSRF layer: a public-looking hostname can still resolve to
+    # 127.0.0.1 or a cloud metadata address. This also rejects odd numeric
+    # encodings that the static check cannot normalise.
+    try:
+        await ensure_public_url(url)
+    except (UnsafeUrl, InvalidUrl) as exc:
+        pipeline("link.rejected", user=user_id, host=host, reason="ssrf", detail=str(exc)[:120])
+        await message.answer(texts.blocked_url_text(), parse_mode="HTML")
+        return
+    except Exception as exc:  # noqa: BLE001 - a resolver hiccup must not 500 the user
+        logger.debug("SSRF resolution check skipped for %s: %s", host, exc)
     if not services.limiter.hit(user_id):
         pipeline("link.rejected", user=user_id, host=host, reason="rate_limited")
         await message.answer(
@@ -374,10 +420,14 @@ async def on_ticket(
         return
 
     if callback_data.action == "cancel":
-        stopped = services.queue.cancel(ticket.id)
+        # Stop the in-memory job *and* the durable row: a queued ticket that
+        # only left memory would be resumed as a zombie on the next restart.
+        in_memory = services.queue.cancel(ticket.id)
+        in_db = services.tickets.cancel(ticket.id)
         event = services.active.event(ticket.id)
         if event:
             event.set()
+        stopped = in_memory or in_db
         await callback.answer("🛑 Cancelled" if stopped else "Nothing left to stop")
         await callback.message.edit_text(
             texts.cancel_text(), parse_mode="HTML", reply_markup=keyboards.cancel_menu(ticket.id)
@@ -491,6 +541,7 @@ def _admin_view(services: Services) -> str:
     stats = services.stats.global_()
     snapshot = services.queue.snapshot()
     free = shutil.disk_usage(services.workflow.temp_dir).free
+    recovered = getattr(services, "recovered", 0)
     return texts.admin_text(
         services.settings.force_join(),
         stats,
@@ -498,7 +549,22 @@ def _admin_view(services: Services) -> str:
         pending=snapshot.pending,
         disk_free=f"{free // (1024 * 1024)} MB",
         version=services.version,
+        memory_mb=rss_mb(),
+        temp_used=format_size(directory_bytes(services.workflow.temp_dir)),
+        uptime=uptime_text(),
+        failures_today=int(stats.get("errors", 0) or 0),
+        resumed=recovered,
     )
+
+
+def _admin_queue_view(services: Services) -> str:
+    tickets = services.tickets.queue_contents()
+    live = {ticket_id: phase for ticket_id, phase in services.queue.live_phases().items()}
+    return texts.admin_queue_text(tickets, live=live)
+
+
+def _admin_errors_view(services: Services) -> str:
+    return texts.admin_errors_text(services.tickets.recent_failures())
 
 
 @router.message(Command("admin"))
@@ -527,6 +593,22 @@ async def on_admin(
         return
 
     action = callback_data.action
+    if action == "queue":
+        await callback.message.edit_text(
+            _admin_queue_view(services),
+            parse_mode="HTML",
+            reply_markup=keyboards.admin_back_menu(),
+        )
+        await callback.answer()
+        return
+    if action == "errors":
+        await callback.message.edit_text(
+            _admin_errors_view(services),
+            parse_mode="HTML",
+            reply_markup=keyboards.admin_back_menu(),
+        )
+        await callback.answer()
+        return
     if action == "toggle":
         policy = services.settings.toggle_force_join()
         if policy.enabled and not policy.channel:
@@ -574,6 +656,7 @@ async def on_admin(
                                     name="broadcast")
                 await callback.answer("Broadcast started 📣")
 
+    # "refresh" and unknown actions fall through to a dashboard re-render below.
     policy = services.settings.force_join()
     await callback.message.edit_text(
         _admin_view(services),

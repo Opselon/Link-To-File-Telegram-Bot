@@ -17,6 +17,7 @@ from linktofile.application.preferences import UserPreferences
 from linktofile.application.preview import PreviewService
 from linktofile.application.queue import DownloadQueue
 from linktofile.application.ratelimit import RateLimiter
+from linktofile.application.recovery import Recovery
 from linktofile.application.settings import AccessGuard, SettingsService
 from linktofile.domain.policies import FormatPolicy
 from linktofile.infrastructure.membership import TelegramMembership
@@ -48,6 +49,9 @@ class Services:
     cap_mb: int
     admin_id: Optional[int] = None
     version: str = ""
+    recovery: Optional[Recovery] = None
+    # Jobs replayed from disk on this boot (surfaced on the admin dashboard).
+    recovered: int = 0
 
     def is_admin(self, user_id: int) -> bool:
         return bool(self.admin_id and user_id == self.admin_id)

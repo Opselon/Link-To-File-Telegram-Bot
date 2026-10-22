@@ -206,6 +206,10 @@ def admin_menu(policy: ForceJoinPolicy, *, has_channel: bool = True) -> InlineKe
             btn("📣 Broadcast", callback_data=AdminCB(action="broadcast").pack()),
             btn("🧹 Clear join cache", callback_data=AdminCB(action="cache").pack()),
         ],
+        [
+            btn("📦 Queue", callback_data=AdminCB(action="queue").pack()),
+            btn("⚠️ Errors", callback_data=AdminCB(action="errors").pack()),
+        ],
         [btn("🔄 Refresh", callback_data=AdminCB(action="menu").pack(), style="success")],
         [_back("home")],
     ]
@@ -213,6 +217,16 @@ def admin_menu(policy: ForceJoinPolicy, *, has_channel: bool = True) -> InlineKe
         rows.insert(1, [btn("📢 Set a channel first", callback_data=AdminCB(action="channel").pack(),
                             style="danger")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_back_menu() -> InlineKeyboardMarkup:
+    """Sub-view footer so every admin page can get back to the dashboard."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [btn("🔄 Refresh", callback_data=AdminCB(action="refresh").pack(), style="success")],
+            [btn("⬅️ Back", callback_data=AdminCB(action="menu").pack()), _close()],
+        ]
+    )
 
 
 def join_menu(policy: ForceJoinPolicy, *, invite_url: Optional[str] = None) -> InlineKeyboardMarkup:

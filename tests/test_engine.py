@@ -18,6 +18,17 @@ from linktofile.infrastructure.download.engine import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _allow_the_local_test_server():
+    """These tests fetch from 127.0.0.1 on purpose; the SSRF gate stays tested
+    separately in ``test_ssrf.py`` where enforcement is explicitly on."""
+    from linktofile.shared import security
+
+    security.set_enforcement(False)
+    yield
+    security.set_enforcement(None)
+
+
 @pytest.fixture
 async def server(aiohttp_server):
     async def report(request):

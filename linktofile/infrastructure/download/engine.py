@@ -7,33 +7,40 @@ import logging
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import aiohttp
 
 from linktofile.config import (
-    CHUNK_SIZE,
     DOWNLOAD_TIMEOUT,
     DOWNLOADS_DIR,
     HTTP_POOL_SIZE,
     INSTANT_HOSTS,
     INSTANT_PROXY,
+    SSRF_MAX_REDIRECTS,
+    STALL_TIMEOUT,
     UPLOAD_LIMIT_BYTES,
     PROXY_URL,
     YTDLP_CACHE_DIR,
     YTDLP_COOKIES_FILE,
     YTDLP_FRAGMENTS,
     YTDLP_PROXY,
+    YTDLP_THREADS,
 )
 from linktofile.domain.errors import (
     DownloadCancelled as CancelledError,
     DownloadFailed,
     LoginRequired,
     MediaUnavailable,
+    StalledDownload,
+    TransientDownloadFailed,
+    UnsafeUrl,
 )
+from linktofile.shared.security import ensure_public_url
 from linktofile.shared.telemetry import Timer, pipeline
 from linktofile.shared.utils import clean_filename, format_size, strip_ansi
 
@@ -131,6 +138,7 @@ async def close_session() -> None:
         await _session.close()
     _session = None
     _session_loop = None
+    shutdown_executor()
 
 
 # --- URL helpers ------------------------------------------------------------
@@ -279,136 +287,213 @@ def _check_cancel(cancel_event: Optional[asyncio.Event]) -> None:
         raise DownloadCancelled()
 
 
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+
+
+def _classify_http_status(status: int) -> DownloadFailed:
+    """Map a non-200 answer onto the right error class.
+
+    Only retryable answers become ``TransientDownloadFailed``; a private file or
+    a 404 must fail immediately instead of burning the retry budget.
+    """
+    if status in (401, 403):
+        return DownloadError(
+            f"The server refused the download (HTTP {status}). The file may be private."
+        )
+    if status == 404:
+        return DownloadError("File not found (HTTP 404).")
+    if status == 429:
+        return TransientDownloadFailed(
+            "The server is rate limiting requests. Retrying shortly."
+        )
+    if status in (408, 425) or 500 <= status < 600:
+        return TransientDownloadFailed(f"The server answered HTTP {status}. Retrying.")
+    return DownloadError(f"Download failed with HTTP {status}.")
+
+
+async def _stream_to_disk(
+    response: aiohttp.ClientResponse,
+    url: str,
+    download_id: int,
+    cancel_event: Optional[asyncio.Event],
+    progress_callback: Optional[Callable],
+    *,
+    stall_timeout: float,
+) -> DownloadResult:
+    content_type = (response.headers.get("Content-Type") or "").lower()
+    content_length = response.headers.get("Content-Length")
+    total_size = int(content_length) if content_length and content_length.isdigit() else 0
+
+    if total_size and total_size > MAX_BYTES:
+        # Refuse before writing a single byte.
+        raise DownloadError(
+            f"This file is {format_size(total_size)}, but the bot can "
+            f"deliver at most {format_size(MAX_BYTES)}. Pick a smaller "
+            "file or a lower media quality."
+        )
+
+    suggested = _filename_from_disposition(
+        response.headers.get("Content-Disposition", "")
+    ) or Path(urlparse(str(response.url)).path).name
+    filename = clean_filename(suggested, fallback=f"file_{download_id}")
+
+    if "text/html" in content_type and _extension(filename) not in {".html", ".htm"}:
+        raise _NeedsExtractor(f"content-type {content_type}")
+
+    file_path = DOWNLOADS_DIR / f"{download_id}_{filename}"
+    downloaded = 0
+    started = time.monotonic()
+    last_report = 0.0
+
+    try:
+        async with aiofiles_open(file_path) as handle:
+            while True:
+                _check_cancel(cancel_event)
+                try:
+                    chunk = await asyncio.wait_for(
+                        response.content.readany(), timeout=stall_timeout
+                    )
+                except asyncio.TimeoutError as exc:
+                    pipeline(
+                        "download.stalled",
+                        ticket=download_id,
+                        host=url_host(url),
+                        stall_s=stall_timeout,
+                        bytes=downloaded,
+                        level=logging.WARNING,
+                    )
+                    raise StalledDownload(
+                        f"Nothing arrived for {int(stall_timeout)} seconds — the server stalled."
+                    ) from exc
+                if not chunk:
+                    break
+                downloaded += len(chunk)
+                if downloaded > MAX_BYTES:
+                    raise DownloadError(
+                        f"The file passed {format_size(MAX_BYTES)} (the "
+                        "delivery limit), so the download was stopped early."
+                    )
+                await handle.write(chunk)
+
+                if progress_callback:
+                    now = time.monotonic()
+                    if now - last_report >= _PROGRESS_THROTTLE:
+                        last_report = now
+                        elapsed = max(now - started, 1e-6)
+                        speed = downloaded / elapsed
+                        eta = (
+                            (total_size - downloaded) / speed
+                            if speed > 0 and total_size
+                            else 0
+                        )
+                        progress_callback(downloaded, total_size, speed, eta)
+    except BaseException:
+        # A half-written file must never look like a finished download, even
+        # when the task is cancelled from the outside.
+        _safe_unlink(file_path)
+        raise
+
+    title = _guess_title(url, filename)
+    pipeline(
+        "download.done",
+        ticket=download_id,
+        host=url_host(url),
+        source="direct",
+        bytes=downloaded,
+        ms=int((time.monotonic() - started) * 1000),
+    )
+    return DownloadResult(
+        path=str(file_path),
+        size=downloaded,
+        title=title,
+        source="direct",
+    )
+
+
 async def download_direct(
     url: str,
     download_id: int,
     progress_callback: Optional[Callable] = None,
     cancel_event: Optional[asyncio.Event] = None,
+    *,
+    stall_timeout: Optional[float] = None,
 ) -> DownloadResult:
-    """Stream a URL to disk with retries, size limits and progress."""
-    last_error: Optional[Exception] = None
+    """Stream a URL to disk once, with SSRF-validated redirects and a stall guard.
 
-    for attempt in range(3):
-        _check_cancel(cancel_event)
-        file_path: Optional[Path] = None
-        try:
-            session = await get_session()
-            timeout = aiohttp.ClientTimeout(
-                total=DOWNLOAD_TIMEOUT, sock_connect=30, sock_read=60
-            )
+    Retries live in the workflow (``DownloadWorkflow``): the engine reports a
+    ``TransientDownloadFailed`` and stops, so the attempt count, the backoff and
+    the log line exist in exactly one place instead of two nested loops.
+    """
+    _check_cancel(cancel_event)
+    stall = float(stall_timeout if stall_timeout is not None else STALL_TIMEOUT)
+    file_path: Optional[Path] = None
+    current = url
+
+    try:
+        session = await get_session()
+        timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT, sock_connect=30, sock_read=60)
+
+        for hop in range(SSRF_MAX_REDIRECTS + 1):
+            # Validated before every hop: a public URL must not be able to 302
+            # onto the loopback interface or the cloud metadata endpoint.
+            await ensure_public_url(current)
+
             request_kwargs: dict[str, Any] = {
-                "allow_redirects": True,
+                "allow_redirects": False,
                 "timeout": timeout,
                 "headers": {"Referer": "https://www.google.com/"},
             }
             if PROXY_URL and not PROXY_URL.lower().startswith(("socks4", "socks5")):
                 request_kwargs["proxy"] = PROXY_URL
-            async with session.get(url, **request_kwargs) as response:
-                if response.status != 200:
-                    if response.status in (401, 403):
-                        raise DownloadError(
-                            "The server refused the download (HTTP "
-                            f"{response.status}). The file may be private."
-                        )
-                    if response.status == 404:
-                        raise DownloadError("File not found (HTTP 404).")
-                    if response.status == 429:
-                        raise DownloadError("The server is rate limiting requests. Try again later.")
-                    raise DownloadError(f"Download failed with HTTP {response.status}.")
 
-                content_type = (response.headers.get("Content-Type") or "").lower()
-                content_length = response.headers.get("Content-Length")
-                total_size = int(content_length) if content_length and content_length.isdigit() else 0
-
-                if total_size and total_size > MAX_BYTES:
-                    # Refuse before writing a single byte.
-                    raise DownloadError(
-                        f"This file is {format_size(total_size)}, but the bot can "
-                        f"deliver at most {format_size(MAX_BYTES)}. Pick a smaller "
-                        "file or a lower media quality."
+            async with session.get(current, **request_kwargs) as response:
+                if response.status in _REDIRECT_STATUSES:
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise DownloadError("The server sent a redirect without a target.")
+                    current = urljoin(str(response.url), location)
+                    pipeline(
+                        "download.redirect",
+                        ticket=download_id,
+                        host=url_host(url),
+                        hop=hop + 1,
+                        to=url_host(current),
                     )
+                    continue
 
-                suggested = _filename_from_disposition(
-                    response.headers.get("Content-Disposition", "")
-                ) or Path(urlparse(str(response.url)).path).name
-                filename = clean_filename(suggested, fallback=f"file_{download_id}")
+                if response.status != 200:
+                    raise _classify_http_status(response.status)
 
-                if "text/html" in content_type and _extension(filename) not in {".html", ".htm"}:
-                    raise _NeedsExtractor(f"content-type {content_type}")
-
-                file_path = DOWNLOADS_DIR / f"{download_id}_{filename}"
-                downloaded = 0
-                started = time.monotonic()
-                last_report = 0.0
-
-                async with aiofiles_open(file_path) as handle:
-                    async for chunk in response.content.iter_chunked(CHUNK_SIZE):
-                        _check_cancel(cancel_event)
-                        if not chunk:
-                            continue
-                        downloaded += len(chunk)
-                        if downloaded > MAX_BYTES:
-                            raise DownloadError(
-                                f"The file passed {format_size(MAX_BYTES)} (the "
-                                "delivery limit), so the download was stopped early."
-                            )
-                        await handle.write(chunk)
-
-                        if progress_callback:
-                            now = time.monotonic()
-                            if now - last_report >= _PROGRESS_THROTTLE:
-                                last_report = now
-                                elapsed = max(now - started, 1e-6)
-                                speed = downloaded / elapsed
-                                eta = (
-                                    (total_size - downloaded) / speed
-                                    if speed > 0 and total_size
-                                    else 0
-                                )
-                                progress_callback(downloaded, total_size, speed, eta)
-
-                title = _guess_title(url, filename)
-                pipeline(
-                    "download.done",
-                    ticket=download_id,
-                    host=url_host(url),
-                    source="direct",
-                    bytes=downloaded,
-                    ms=int((time.monotonic() - started) * 1000),
-                )
-                return DownloadResult(
-                    path=str(file_path),
-                    size=downloaded,
-                    title=title,
-                    source="direct",
+                return await _stream_to_disk(
+                    response,
+                    url,
+                    download_id,
+                    cancel_event,
+                    progress_callback,
+                    stall_timeout=stall,
                 )
 
-        except DownloadCancelled:
-            _safe_unlink(file_path)
-            raise
-        except _NeedsExtractor:
-            _safe_unlink(file_path)
-            raise
-        except DownloadError as exc:
-            _safe_unlink(file_path)
-            raise exc
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            _safe_unlink(file_path)
-            last_error = exc
-            logger.warning(
-                "Attempt %s/3 failed for %s: %s", attempt + 1, redact_url(url), exc
-            )
-            if attempt < 2:
-                await asyncio.sleep(2**attempt)
-                continue
-        except Exception as exc:  # noqa: BLE001 - normalise everything else
-            _safe_unlink(file_path)
-            logger.exception("Unexpected download error for %s", redact_url(url))
-            raise DownloadError(f"Internal error: {strip_ansi(str(exc))}") from exc
+        raise DownloadError("The link redirected too many times.")
 
-    if isinstance(last_error, asyncio.TimeoutError):
-        raise DownloadError("Download timed out. The server was too slow.")
-    raise DownloadError("Network error: could not reach the server.")
+    except DownloadCancelled:
+        _safe_unlink(file_path)
+        raise
+    except _NeedsExtractor:
+        _safe_unlink(file_path)
+        raise
+    except (UnsafeUrl, DownloadFailed):
+        _safe_unlink(file_path)
+        raise
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        _safe_unlink(file_path)
+        logger.warning("Transient failure for %s: %s", redact_url(url), exc)
+        raise TransientDownloadFailed(
+            "Network error: the server dropped the connection. Retrying."
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 - normalise everything else
+        _safe_unlink(file_path)
+        logger.exception("Unexpected download error for %s", redact_url(url))
+        raise DownloadError(f"Internal error: {strip_ansi(str(exc))}") from exc
 
 
 def aiofiles_open(path: Path):
@@ -428,10 +513,101 @@ def _safe_unlink(path: Optional[Path]) -> None:
 
 
 # --- yt-dlp -----------------------------------------------------------------
+_executor: Optional[ThreadPoolExecutor] = None
+
+
+def _get_executor() -> ThreadPoolExecutor:
+    """One bounded pool for extractor work.
+
+    The default executor grows with the machine and is shared with every other
+    blocking call; a burst of links could spawn dozens of yt-dlp threads. This
+    pool is sized to the worker count, so memory use stays predictable.
+    """
+    global _executor
+    if _executor is None:
+        _executor = ThreadPoolExecutor(
+            max_workers=YTDLP_THREADS, thread_name_prefix="ytdlp"
+        )
+        logger.debug("Created yt-dlp executor with %s thread(s)", YTDLP_THREADS)
+    return _executor
+
+
+def shutdown_executor() -> None:
+    global _executor
+    if _executor is not None:
+        _executor.shutdown(wait=False, cancel_futures=True)
+        _executor = None
+
+
+async def _await_with_stall_watchdog(
+    future: "asyncio.Future",
+    heartbeat: dict,
+    *,
+    ticket_id: int,
+    host: str,
+    stall_timeout: float,
+) -> dict:
+    """Wait for an executor future, failing fast when it stops making progress.
+
+    yt-dlp runs in a thread that cannot be cancelled; abandoning the await is
+    still the right move: the job is marked failed, its card is updated, and the
+    janitor reaps whatever the thread eventually leaves behind.
+    """
+    poll = max(1.0, min(15.0, stall_timeout / 4))
+    while True:
+        done, _ = await asyncio.wait({future}, timeout=poll)
+        if done:
+            return future.result()
+        idle = time.monotonic() - float(heartbeat.get("last", 0.0))
+        if idle >= stall_timeout:
+            future.cancel()
+            pipeline(
+                "extract.stalled",
+                ticket=ticket_id,
+                host=host,
+                idle_s=int(idle),
+                level=logging.WARNING,
+            )
+            raise StalledDownload(
+                f"The site stopped sending data for {int(idle)}s — retrying."
+            )
+
+
 _MAX_FILESIZE_HINTS = ("file is larger than max-filesize", "larger than max")
 _LOGIN_HINTS = ("login_required", "you've been logged out", "empty media response")
 _PRIVATE_HINTS = ("private", "sign in", "sign-in")
 _BOT_HINTS = ("not a bot", "confirm you", "confirm you're", "checkpoint")
+# Phrases that mean "this media is gone", not "log in": telling a user to add
+# cookies for a deleted reel is wrong, so these are checked first.
+_UNAVAILABLE_HINTS = (
+    "video unavailable",
+    "media is unavailable",
+    "this video is not available",
+    "no longer available",
+    "removed by the uploader",
+    "has been removed",
+    "no video formats found",
+    "requested format is not available",
+    "content is not available",
+    "does not exist",
+)
+# Network-level failures worth a retry; anything else is the site's answer.
+_TRANSIENT_HINTS = (
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "temporary failure in name resolution",
+    "read timed out",
+    "timed out",
+    "http error 408",
+    "http error 429",
+    "http error 500",
+    "http error 502",
+    "http error 503",
+    "http error 504",
+    "unable to download webpage",
+    "incompleteread",
+)
 
 
 def classify_ytdlp_failure(message: str, *, host: str = "") -> DownloadFailed:
@@ -452,6 +628,11 @@ def classify_ytdlp_failure(message: str, *, host: str = "") -> DownloadFailed:
         )
     if "ffmpeg" in lowered and "not found" in lowered:
         return DownloadError("FFmpeg is missing on the server; cannot process this media.")
+    if any(hint in lowered for hint in _UNAVAILABLE_HINTS):
+        return MediaUnavailable(
+            "This media is unavailable — it was removed, made private, or is "
+            "restricted in this region."
+        )
     if any(hint in lowered for hint in _LOGIN_HINTS):
         if instagram:
             return MediaUnavailable(
@@ -472,8 +653,10 @@ def classify_ytdlp_failure(message: str, *, host: str = "") -> DownloadFailed:
         return LoginRequired("This media is private or requires a login.")
     if "unsupported url" in lowered:
         return DownloadError("This site is not supported by the extractor.")
-    if "timed out" in lowered:
-        return DownloadError("The site took too long to respond. Try again.")
+    if any(hint in lowered for hint in _TRANSIENT_HINTS):
+        return TransientDownloadFailed(
+            "The site dropped the connection. Retrying."
+        )
     return DownloadError(f"Could not process this link. {text[:220]}")
 
 
@@ -560,14 +743,34 @@ def _find_output(download_id: int, expected: Optional[str] = None) -> Optional[P
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
+def _wrap_progress_heartbeat(
+    progress_callback: Optional[Callable],
+    heartbeat: dict,
+) -> Callable:
+    """Progress calls also refresh the stall watchdog's clock.
+
+    Always returns a callback: the hook is what keeps yt-dlp's *own* download
+    progress visible to the watchdog even when the caller asked for no card.
+    """
+
+    def wrapped(downloaded: int, total: int, speed: float, eta: float) -> None:
+        heartbeat["last"] = time.monotonic()
+        if progress_callback is not None:
+            progress_callback(downloaded, total, speed, eta)
+
+    return wrapped
+
+
 async def download_with_ytdlp(
     url: str,
     download_id: int,
     options: Optional[dict] = None,
     progress_callback: Optional[Callable] = None,
     cancel_event: Optional[asyncio.Event] = None,
+    *,
+    stall_timeout: Optional[float] = None,
 ) -> DownloadResult:
-    """Extract media with yt-dlp in a worker thread (blocking library)."""
+    """Extract media with yt-dlp in a bounded worker thread (blocking library)."""
     _check_cancel(cancel_event)
     try:
         import yt_dlp  # imported lazily: keeps startup fast and RAM low
@@ -576,8 +779,14 @@ async def download_with_ytdlp(
             "Media extraction is unavailable on this server (yt-dlp missing)."
         ) from exc
 
+    stall = float(stall_timeout if stall_timeout is not None else STALL_TIMEOUT)
+    heartbeat = {"last": time.monotonic()}
     ydl_opts = _build_ytdlp_options(
-        download_id, options, progress_callback, cancel_event, url=url
+        download_id,
+        options,
+        _wrap_progress_heartbeat(progress_callback, heartbeat),
+        cancel_event,
+        url=url,
     )
     loop = asyncio.get_running_loop()
     host = url_host(url)
@@ -606,7 +815,14 @@ async def download_with_ytdlp(
             return info
 
     async def _extract(opts: dict) -> dict:
-        return await loop.run_in_executor(None, _run, opts)
+        future = loop.run_in_executor(_get_executor(), _run, opts)
+        return await _await_with_stall_watchdog(
+            future,
+            heartbeat,
+            ticket_id=download_id,
+            host=host,
+            stall_timeout=stall,
+        )
 
     try:
         try:

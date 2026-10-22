@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ipaddress
 import math
 import re
 import time
@@ -20,12 +19,6 @@ user_last_request: Dict[int, float] = {}
 _MAX_RATE_LIMIT_ENTRIES = 50_000
 
 _ALLOWED_SCHEMES = {"http", "https"}
-_BLOCKED_HOSTNAMES = {
-    "localhost",
-    "localhost.localdomain",
-    "ip6-localhost",
-    "metadata.google.internal",
-}
 
 
 def is_valid_url(url: str) -> bool:
@@ -46,33 +39,15 @@ def is_valid_url(url: str) -> bool:
 
 
 def is_safe_url(url: str) -> bool:
-    """Reject loopback/private/link-local targets (SSRF guard)."""
-    try:
-        parsed_url = urlparse(url)
-        hostname = parsed_url.hostname
-        if not hostname:
-            return False
+    """True when the URL target is not loopback/private/link-local (SSRF guard).
 
-        hostname = hostname.strip("[]").lower()
-        if hostname in _BLOCKED_HOSTNAMES or hostname.endswith(".local"):
-            return False
+    Kept as a thin alias of the shared security module so there is exactly one
+    blocked-list in the codebase. Full protection (DNS resolution, hop-by-hop
+    redirect checks) lives in ``ensure_public_url`` and the download engine.
+    """
+    from linktofile.shared.security import is_safe_url as _is_safe
 
-        try:
-            ip = ipaddress.ip_address(hostname)
-        except ValueError:
-            # Not an IP literal; a DNS name is acceptable here. The HTTP client
-            # still resolves it, so obviously-local names are blocked above.
-            return True
-        return not (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-        )
-    except Exception:
-        return False
+    return _is_safe(url)
 
 
 def rate_limit_remaining(user_id: int) -> int:

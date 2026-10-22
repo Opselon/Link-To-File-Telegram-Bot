@@ -27,6 +27,18 @@ class DownloadFailed(BotError):
     pass
 
 
+class TransientDownloadFailed(DownloadFailed):
+    """A failure that is worth retrying (reset socket, 5xx, slow server).
+
+    The retry policy lives in the workflow, not in the engine: one place owns
+    the attempt count, the backoff and the pipeline log for it.
+    """
+
+
+class StalledDownload(TransientDownloadFailed):
+    """No byte arrived for longer than the stall window."""
+
+
 class MediaUnavailable(DownloadFailed):
     """The site answered, but handed back no media (private, gone, age-gated)."""
 
@@ -46,6 +58,10 @@ class QueueSaturated(BotError):
 
 class NotEnoughDisk(BotError):
     pass
+
+
+class DuplicateJob(BotError):
+    """An identical download is already queued or running for this user."""
 
 
 class ChannelNotConfigured(BotError):

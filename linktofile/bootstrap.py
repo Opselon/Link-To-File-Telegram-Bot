@@ -22,6 +22,7 @@ from linktofile.config import (
     ADMIN_ID,
     BOT_TOKEN,
     DOWNLOADS_DIR,
+    DOWNLOAD_RETRIES,
     MAX_PENDING_PER_USER,
     MIN_FREE_DISK_MB,
     PREVIEW_TIMEOUT,
@@ -30,11 +31,16 @@ from linktofile.config import (
     QUEUE_MAX_SIZE,
     QUEUE_TASK_TIMEOUT,
     RATE_LIMIT_SECONDS,
+    RESUME_MAX_JOBS,
+    RESUME_ON_STARTUP,
+    RETRY_BACKOFF_MAX,
+    RETRY_BACKOFF_SECONDS,
     TELEGRAM_API_URL,
     UPLOAD_LIMIT_BYTES,
     UPLOAD_LIMIT_MB,
     DB_PATH,
 )
+from linktofile.domain.models import FailureKind
 from linktofile.domain.policies import FormatPolicy
 from linktofile.infrastructure.download.adapter import EngineDownloadAdapter
 from linktofile.infrastructure.download.preview import YtDlpProbe
@@ -47,7 +53,9 @@ from linktofile.infrastructure.persistence.sqlite import (
     SqliteUsers,
 )
 from linktofile.infrastructure.system.version import VERSION
+from linktofile.application.recovery import QueueRecovery
 from linktofile.infrastructure.telegram.app import build_dispatcher
+from linktofile.infrastructure.telegram.resume import HeadlessDelivery
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +100,24 @@ def build_application() -> Application:
         policy=policy,
         temp_dir=DOWNLOADS_DIR,
         min_free_mb=MIN_FREE_DISK_MB,
+        retries=DOWNLOAD_RETRIES,
+        backoff_seconds=float(RETRY_BACKOFF_SECONDS),
+        backoff_max=float(RETRY_BACKOFF_MAX),
     )
+
+    def _record_failure(ticket_id: int, kind: str, reason: str) -> None:
+        """Queue-level failure (task timeout): persist it, never raise."""
+        try:
+            tickets.fail(ticket_id, kind=FailureKind(kind), error=reason)
+        except Exception as exc:  # noqa: BLE001 - accounting is best effort
+            logger.warning("Could not record queue failure for %s: %s", ticket_id, exc)
+
     queue = DownloadQueue(
         concurrency=QUEUE_CONCURRENCY,
         max_size=QUEUE_MAX_SIZE,
         per_user_limit=MAX_PENDING_PER_USER,
         task_timeout=QUEUE_TASK_TIMEOUT,
+        on_failure=_record_failure,
     )
 
     services = Services(
@@ -120,6 +140,18 @@ def build_application() -> Application:
         admin_id=ADMIN_ID,
         version=VERSION,
     )
+
+    if RESUME_ON_STARTUP:
+        services.recovery = QueueRecovery(
+            tickets=tickets,
+            queue=queue,
+            workflow=workflow,
+            active=services.active,
+            delivery_factory=lambda item: HeadlessDelivery(
+                bot, item.user_id, ticket_id=item.ticket_id, admin_id=ADMIN_ID
+            ),
+            max_jobs=RESUME_MAX_JOBS,
+        )
 
     logger.info(
         "Wired: db=%s cap=%sMB workers=%s preview=%ss/%ss",

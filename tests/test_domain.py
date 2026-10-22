@@ -92,3 +92,35 @@ def test_media_too_large_is_a_bot_error():
     from linktofile.domain.errors import BotError
 
     assert issubclass(MediaTooLarge, BotError)
+
+
+def test_quality_round_trips_through_the_durable_queue():
+    from linktofile.domain.models import Quality
+
+    assert Quality.decode(Quality.video(720).encode()) == Quality.video(720)
+    assert Quality.decode(Quality.video(None).encode()) == Quality.video(None)
+    assert Quality.decode(Quality.audio(192).encode()) == Quality.audio(192)
+    assert Quality.decode("garbage") is None
+
+
+def test_queued_is_an_active_non_terminal_state():
+    from linktofile.domain.models import DownloadStatus
+
+    assert DownloadStatus.QUEUED.is_terminal is False
+    assert DownloadStatus.QUEUED.is_active is True
+    assert DownloadStatus.DOWNLOADING.is_active is True
+    assert DownloadStatus.COMPLETED.is_active is False
+
+
+def test_failure_kind_mapper_records_the_truth():
+    from linktofile.domain.errors import (
+        BotError,
+        StalledDownload,
+        TransientDownloadFailed,
+    )
+    from linktofile.domain.models import FailureKind, failure_kind_of
+
+    assert failure_kind_of(StalledDownload("stalled")) == FailureKind.STALLED.value
+    assert failure_kind_of(TransientDownloadFailed("reset")) == FailureKind.NETWORK.value
+    assert failure_kind_of(BotError("plain")) == FailureKind.UNKNOWN.value
+    assert failure_kind_of(Exception("not ours")) == FailureKind.UNKNOWN.value

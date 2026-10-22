@@ -91,9 +91,17 @@ def admin_text(
     pending: int,
     disk_free: str,
     version: str = VERSION,
+    memory_mb: int = 0,
+    temp_used: str = "0 B",
+    uptime: str = "",
+    failures_today: int = 0,
+    resumed: int = 0,
 ) -> str:
     channel = policy.channel or "not set"
     state = "🟢 on" if policy.enabled else "⚪️ off"
+    queued = stats.get("queued", 0)
+    downloading = stats.get("downloading", 0)
+    uploading = stats.get("uploading", 0)
     return (
         "<b>🛠 Admin dashboard</b>\n\n"
         f"👥 Users: <b>{stats.get('users', 0)}</b>\n"
@@ -102,10 +110,88 @@ def admin_text(
         f"⚠️ Failed: <b>{stats.get('failed', 0)}</b>\n"
         f"💾 Delivered: <b>{format_size(stats.get('bytes', 0))}</b>\n\n"
         f"⚙️ Workers: <b>{active}</b> busy · <b>{pending}</b> waiting\n"
-        f"🗄 Disk free: <b>{disk_free}</b>\n"
-        f"🔒 Force join: <b>{state}</b> · 📢 {html.escape(channel)}\n"
+        f"📦 In flight: <b>{queued}</b> queued · <b>{downloading}</b> downloading · "
+        f"<b>{uploading}</b> uploading\n"
+        f"🔁 Resumed this boot: <b>{resumed}</b> · ⚠️ Errors today: <b>{failures_today}</b>\n"
+        f"🗄 Disk free: <b>{disk_free}</b> · temp: <b>{temp_used}</b>\n"
+        + (f"🧠 RAM: <b>{memory_mb} MB</b> · ⏱ up: <b>{uptime}</b>\n" if memory_mb else "")
+        + f"🔒 Force join: <b>{state}</b> · 📢 {html.escape(channel)}\n"
         f"🏷 Version: <b>{version}</b>"
     )
+
+
+def admin_queue_text(
+    tickets: Sequence[DownloadTicket],
+    *,
+    live: dict[int, str] | None = None,
+    limit: int = 12,
+) -> str:
+    """Live queue with the age of each job — the stuck-download view."""
+    live = live or {}
+    if not tickets:
+        return (
+            "📦 <b>Queue</b>\n\n"
+            "Nothing is queued or running right now."
+        )
+    lines = ["📦 <b>Queue</b>\n"]
+    for ticket in tickets[:limit]:
+        host = ""
+        try:
+            host = (urlparse(ticket.url).hostname or "")[:32]
+        except ValueError:
+            host = "?"
+        state = live.get(ticket.id) or ticket.status.value
+        age = _age(ticket.created_at)
+        quality = ticket.quality.label if ticket.quality else "auto"
+        lines.append(
+            f"<code>#{ticket.id}</code> {html.escape(state)} · {html.escape(host)}"
+            f" · {html.escape(quality)} · {age}"
+        )
+    if len(tickets) > limit:
+        lines.append(f"…and {len(tickets) - limit} more")
+    lines.append("\n<i>status comes from the live queue when the job is in memory.</i>")
+    return "\n".join(lines)
+
+
+def admin_errors_text(tickets: Sequence[DownloadTicket], *, limit: int = 8) -> str:
+    """Recent failures with their machine-readable kind."""
+    if not tickets:
+        return "✅ <b>Errors</b>\n\nNo failed tickets recorded."
+    lines = ["⚠️ <b>Recent failures</b>\n"]
+    for ticket in tickets[:limit]:
+        reason = (ticket.error or "no reason recorded").replace("\n", " ")[:110]
+        lines.append(
+            f"<code>#{ticket.id}</code> <b>{html.escape(ticket.error_kind or 'unknown')}</b>"
+            f" · {html.escape(reason)}"
+        )
+    return "\n".join(lines)
+
+
+def duplicate_text(ticket_id: int) -> str:
+    return (
+        "⏳ <b>Already on it</b>\n\n"
+        f"That exact link is already queued as <code>#{ticket_id}</code>. "
+        "I won't start it twice — cancel the running one first if you want a fresh copy."
+    )
+
+
+def _age(created_at: str | None) -> str:
+    if not created_at:
+        return "—"
+    from datetime import datetime, timezone
+
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            stamp = datetime.strptime(str(created_at)[:19], fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        seconds = max(0, int((datetime.now(timezone.utc) - stamp).total_seconds()))
+        if seconds < 60:
+            return f"{seconds}s"
+        if seconds < 3600:
+            return f"{seconds // 60}m"
+        return f"{seconds // 3600}h"
+    return "—"
 
 
 def join_text(policy: ForceJoinPolicy) -> str:
