@@ -71,6 +71,36 @@ QUEUE_CONCURRENCY = _int("QUEUE_CONCURRENCY", 3, minimum=1, maximum=16)
 QUEUE_MAX_SIZE = _int("QUEUE_MAX_SIZE", 200, minimum=1, maximum=10_000)
 RATE_LIMIT_SECONDS = _int("RATE_LIMIT_SECONDS", 3, minimum=0, maximum=3600)
 
+# --- Resilience -------------------------------------------------------------
+# How many times one job may hit a *transient* failure before the user is told
+# it failed. Backoff doubles from RETRY_BACKOFF_SECONDS, capped at the max.
+DOWNLOAD_RETRIES = _int("DOWNLOAD_RETRIES", 3, minimum=1, maximum=10)
+RETRY_BACKOFF_SECONDS = _int("RETRY_BACKOFF_SECONDS", 2, minimum=0, maximum=120)
+RETRY_BACKOFF_MAX = _int("RETRY_BACKOFF_MAX", 30, minimum=0, maximum=600)
+# A transfer that delivers nothing at all for this long is treated as stalled
+# and retried instead of hanging until the whole task times out.
+STALL_TIMEOUT = _int("STALL_TIMEOUT", 120, minimum=5, maximum=3600)
+# Telegram flood waits are honoured up to this long, then the upload fails
+# cleanly instead of blocking a worker forever.
+FLOOD_WAIT_MAX = _int("FLOOD_WAIT_MAX", 60, minimum=1, maximum=900)
+
+# --- Security ---------------------------------------------------------------
+# Fail-closed URL policy: public http(s) only, no loopback/private/metadata.
+# SSRF_DNS_CHECK=0 keeps the static checks but skips resolution (tests, or an
+# operator behind a split-horizon DNS they trust).
+SSRF_ENFORCE = _int("SSRF_ENFORCE", 1, minimum=0, maximum=1) == 1
+SSRF_DNS_CHECK = _int("SSRF_DNS_CHECK", 1, minimum=0, maximum=1) == 1
+SSRF_MAX_REDIRECTS = _int("SSRF_MAX_REDIRECTS", 5, minimum=0, maximum=20)
+# Total bytes of temp files allowed before new jobs are refused.
+MAX_TEMP_MB = _int("MAX_TEMP_MB", 4096, minimum=0)
+# yt-dlp runs in a bounded thread pool: unbounded executors are how a burst of
+# links turns into an OOM.
+YTDLP_THREADS = _int("YTDLP_THREADS", max(2, QUEUE_CONCURRENCY), minimum=1, maximum=32)
+
+# Resume jobs committed to the durable queue by the previous process.
+RESUME_ON_STARTUP = _int("RESUME_ON_STARTUP", 1, minimum=0, maximum=1) == 1
+RESUME_MAX_JOBS = _int("RESUME_MAX_JOBS", 50, minimum=0, maximum=1000)
+
 # --- Performance ------------------------------------------------------------
 DOWNLOAD_CHUNK_KB = _int("DOWNLOAD_CHUNK_KB", 256, minimum=16, maximum=8192)
 UPLOAD_CHUNK_KB = _int("UPLOAD_CHUNK_KB", 1024, minimum=64, maximum=8192)

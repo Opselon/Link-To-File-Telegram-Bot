@@ -2,14 +2,30 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+from linktofile.domain.errors import (
+    InvalidUrl,
+    LoginRequired,
+    MediaTooLarge,
+    MediaUnavailable,
+    NotEnoughDisk,
+    StalledDownload,
+    TransientDownloadFailed,
+    UnsafeUrl,
+)
+
 
 class DownloadStatus(str, Enum):
     PENDING = "pending"
+    # ``queued`` is the durable half of the queue: the row says "this job has a
+    # known quality and must run", which is what makes it resumable after a
+    # restart. ``pending`` means "waiting for the user to pick a quality" and is
+    # deliberately *not* resumed (nobody can guess what they wanted).
+    QUEUED = "queued"
     DOWNLOADING = "downloading"
     UPLOADING = "uploading"
     COMPLETED = "completed"
@@ -19,6 +35,55 @@ class DownloadStatus(str, Enum):
     @property
     def is_terminal(self) -> bool:
         return self in {self.COMPLETED, self.FAILED, self.CANCELLED}
+
+    @property
+    def is_active(self) -> bool:
+        """True while the job still holds a queue slot (or may hold one)."""
+        return self in {self.PENDING, self.QUEUED, self.DOWNLOADING, self.UPLOADING}
+
+
+class FailureKind(str, Enum):
+    """Why a ticket ended up ``failed`` — machine-readable, shown to the admin."""
+
+    NETWORK = "network"
+    STALLED = "stalled"
+    TIMEOUT = "timeout"
+    INTERRUPTED = "interrupted"
+    ABANDONED = "abandoned"
+    QUEUE_FULL = "queue_full"
+    DUPLICATE = "duplicate"
+    LOGIN = "login"
+    UNAVAILABLE = "unavailable"
+    TOO_LARGE = "too_large"
+    BAD_URL = "bad_url"
+    UNKNOWN = "unknown"
+
+
+def failure_kind_of(error: BaseException) -> str:
+    """Coarse bucket for the ``error_kind`` column."""
+    if isinstance(error, StalledDownload):
+        return FailureKind.STALLED.value
+    if isinstance(error, TransientDownloadFailed):
+        return FailureKind.NETWORK.value
+    if isinstance(error, LoginRequired):
+        return FailureKind.LOGIN.value
+    if isinstance(error, MediaUnavailable):
+        return FailureKind.UNAVAILABLE.value
+    if isinstance(error, MediaTooLarge):
+        return FailureKind.TOO_LARGE.value
+    if isinstance(error, (InvalidUrl, UnsafeUrl)):
+        return FailureKind.BAD_URL.value
+    if isinstance(error, NotEnoughDisk):
+        return FailureKind.UNKNOWN.value
+    return FailureKind.UNKNOWN.value
+
+
+# Statuses that occupy a queue slot and must never repeat for one (user, url).
+BUSY_STATUSES = (
+    DownloadStatus.QUEUED.value,
+    DownloadStatus.DOWNLOADING.value,
+    DownloadStatus.UPLOADING.value,
+)
 
 
 class QualityKind(str, Enum):
@@ -49,6 +114,29 @@ class Quality:
     @classmethod
     def audio(cls, bitrate: Optional[int] = 192) -> "Quality":
         return cls(kind=QualityKind.AUDIO, bitrate=bitrate)
+
+    # --- durable encoding -----------------------------------------------------
+    # The queue survives restarts, so the requested quality must survive with
+    # it: ``video:720`` / ``video:best`` / ``audio:192``.
+    def encode(self) -> str:
+        if self.kind is QualityKind.AUDIO:
+            return f"audio:{self.bitrate or 'best'}"
+        return f"video:{self.height if self.height is not None else 'best'}"
+
+    @classmethod
+    def decode(cls, value: Optional[str]) -> Optional["Quality"]:
+        if not value:
+            return None
+        kind, _, raw = str(value).partition(":")
+        raw = raw.strip()
+        try:
+            if kind == "audio":
+                return cls.audio(int(raw) if raw and raw != "best" else 192)
+            if kind == "video":
+                return cls.video(None if not raw or raw == "best" else int(raw))
+        except ValueError:
+            return None
+        return None
 
     @property
     def label(self) -> str:
@@ -86,6 +174,10 @@ class DownloadTicket:
     filename: Optional[str] = None
     size: Optional[int] = None
     quality: Optional[Quality] = None
+    attempts: int = 0
+    error: Optional[str] = None
+    error_kind: Optional[str] = None
+    created_at: Optional[str] = None
 
     def start(self) -> None:
         self._move_to(DownloadStatus.DOWNLOADING)
@@ -117,6 +209,12 @@ class DownloadTicket:
 
 _TRANSITIONS: dict[DownloadStatus, set[DownloadStatus]] = {
     DownloadStatus.PENDING: {
+        DownloadStatus.QUEUED,
+        DownloadStatus.DOWNLOADING,
+        DownloadStatus.CANCELLED,
+        DownloadStatus.FAILED,
+    },
+    DownloadStatus.QUEUED: {
         DownloadStatus.DOWNLOADING,
         DownloadStatus.CANCELLED,
         DownloadStatus.FAILED,
@@ -173,3 +271,27 @@ class ForceJoinPolicy:
 class QueueSnapshot:
     active: int
     pending: int
+
+
+@dataclass(frozen=True, slots=True)
+class ResumableJob:
+    """A job the previous process committed to disk but never finished."""
+
+    ticket_id: int
+    user_id: int
+    url: str
+    quality: Optional[Quality]
+    attempts: int
+
+
+@dataclass(slots=True)
+class RecoveryReport:
+    """What boot found in the database and what it did about it."""
+
+    resumable: list[ResumableJob] = field(default_factory=list)
+    interrupted: int = 0
+    abandoned: int = 0
+
+    @property
+    def resumed(self) -> int:
+        return len(self.resumable)

@@ -132,8 +132,41 @@ All settings are environment variables (`.env` is read automatically). Only the 
 | `MIN_FREE_DISK_MB` | `512` | Refuse new jobs below this free space |
 | `TEMP_FILE_TTL` | `900` | Seconds before orphaned temp files are swept |
 | `MAX_PENDING_PER_USER` | `2` | Per-user queue depth |
+| `DOWNLOAD_RETRIES` | `3` | Attempts per job on transient failures (1–10) |
+| `RETRY_BACKOFF_SECONDS` | `2` | First retry delay; doubles per attempt |
+| `RETRY_BACKOFF_MAX` | `30` | Ceiling for that backoff |
+| `STALL_TIMEOUT` | `120` | Seconds of silence before a transfer counts as stalled |
+| `FLOOD_WAIT_MAX` | `60` | Longest Telegram flood wait the bot absorbs before failing cleanly |
+| `RESUME_ON_STARTUP` | `1` | Replay jobs committed to the durable queue by the previous process |
+| `RESUME_MAX_JOBS` | `50` | Cap on jobs resumed in one boot (the rest stay queued) |
+| `SSRF_ENFORCE` | `1` | Fail-closed URL policy; `0` only for trusted networks |
+| `SSRF_DNS_CHECK` | `1` | Also reject hostnames that resolve to private addresses |
+| `SSRF_MAX_REDIRECTS` | `5` | Redirect hops allowed; each is re-validated |
+| `MAX_TEMP_MB` | `4096` | Temp-dir budget before new jobs are refused |
+| `YTDLP_THREADS` | `QUEUE_CONCURRENCY` | Size of the yt-dlp worker pool (1–32) |
 | `DATA_DIR` | project dir | Database, logs, temp files (`/data` in Docker) |
 | `LOG_LEVEL` | `INFO` | `DEBUG` for troubleshooting |
+
+### Durability and recovery
+
+The downloads table *is* the queue. Every accepted job is written to SQLite
+(`status = 'queued'` plus its chosen quality) **before** it enters the in-memory
+asyncio queue, so a crash or a `docker restart` cannot lose an accepted link:
+
+- on boot, `queued` rows are replayed through the normal workflow and delivered
+  as a fresh chat message;
+- rows that were `downloading`/`uploading` are failed as `interrupted` — their
+  temp file is gone, so pretending they still run would be a lie;
+- tickets still waiting for a quality choice are failed as `abandoned`;
+- a partial unique index (`user_id, url WHERE status IN ('queued','downloading','uploading')`)
+  makes a double-tapped link a no-op instead of two downloads;
+- `/admin` → **Queue** shows live jobs with their age, **Errors** shows recent
+  failures with their machine-readable kind.
+
+Transient failures (DNS, resets, 408/425/429/5xx, stalls) are retried with
+capped exponential backoff; private/DRM/404/oversized answers fail immediately so
+the retry budget is not wasted. `STALL_TIMEOUT` catches a connection that stops
+sending without closing, and `FLOOD_WAIT_MAX` bounds Telegram's rate-limit waits.
 
 ### Blocked sites (YouTube bot check, geo-blocks)
 

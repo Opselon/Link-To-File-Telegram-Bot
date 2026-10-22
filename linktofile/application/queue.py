@@ -13,7 +13,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, Optional
 
-from linktofile.domain.errors import QueueSaturated
+from linktofile.domain.errors import DuplicateJob, QueueSaturated
 from linktofile.domain.models import QueueSnapshot
 from linktofile.shared.telemetry import pipeline
 
@@ -40,11 +40,13 @@ class DownloadQueue:
         max_size: int = 200,
         per_user_limit: int = 2,
         task_timeout: float = 1800,
+        on_failure: Optional[Callable[[int, str, str], None]] = None,
     ) -> None:
         self._queue: asyncio.Queue[_Item] = asyncio.Queue(maxsize=max_size)
         self.concurrency = max(1, int(concurrency))
         self.per_user_limit = max(1, int(per_user_limit))
         self.task_timeout = float(task_timeout)
+        self._on_failure = on_failure
         self._workers: list[asyncio.Task] = []
         self._running = False
         self._active = 0
@@ -70,6 +72,23 @@ class DownloadQueue:
     def is_running(self, key: int) -> bool:
         return key in self._tasks
 
+    def is_queued(self, key: int) -> bool:
+        return any(item.key == key for item in list(self._queue._queue))  # type: ignore[attr-defined]
+
+    def keys(self) -> dict[int, str]:
+        """Live tickets and where they sit — the admin panel's queue view."""
+        view: dict[int, str] = {}
+        for item in list(self._queue._queue):  # type: ignore[attr-defined]
+            if item.key is not None:
+                view[int(item.key)] = "queued"
+        for key in self._tasks:
+            view[int(key)] = "running"
+        return view
+
+    def live_phases(self) -> dict[int, str]:
+        """Alias kept explicit for the admin dashboard."""
+        return self.keys()
+
     # --- producer -----------------------------------------------------------
     async def submit(
         self,
@@ -79,7 +98,14 @@ class DownloadQueue:
         user_id: Optional[int] = None,
         **kwargs,
     ) -> int:
-        """Enqueue a coroutine function; returns its queue position (0 = next)."""
+        """Enqueue a coroutine function; returns its queue position (0 = next).
+
+        Submitting a ticket that is already live is refused: one ticket must
+        never run twice (double-tap, a retried callback, or a resumed job that
+        is already active).
+        """
+        if key is not None and (self.is_running(key) or self.is_queued(key)):
+            raise DuplicateJob("This job is already in the queue.")
         if user_id is not None and self.load(user_id) >= self.per_user_limit:
             raise QueueSaturated
 
@@ -151,6 +177,15 @@ class DownloadQueue:
                     timeout_s=self.task_timeout,
                     level=logging.ERROR,
                 )
+                if self._on_failure is not None and item.key is not None:
+                    try:
+                        self._on_failure(
+                            int(item.key),
+                            "timeout",
+                            f"No progress in {int(self.task_timeout)}s.",
+                        )
+                    except Exception:  # noqa: BLE001 - the queue must not crash on accounting
+                        logger.exception("Timeout accounting failed for job %s", item.key)
             except Exception as exc:  # noqa: BLE001 - one bad job must not kill a worker
                 logger.exception("Worker %s job failed: %s", index, exc)
             finally:

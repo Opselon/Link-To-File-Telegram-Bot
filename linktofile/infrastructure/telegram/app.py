@@ -19,6 +19,7 @@ from linktofile.config import (
     YTDLP_COOKIES_FILE,
     YTDLP_PROXY,
 )
+from linktofile.domain.models import FailureKind
 from linktofile.infrastructure.janitor import janitor_loop
 from linktofile.infrastructure.telegram import handlers
 from linktofile.shared.telemetry import pipeline
@@ -63,10 +64,32 @@ async def on_startup(services: Services, bot: Bot) -> None:
     )
 
     # A restart strands whatever the last process had in flight: the queue is
-    # in memory, so those tickets would stay "downloading" forever.
-    reaped = services.tickets.reap_stale()
-    if reaped:
-        logger.info("Reaped %s stale ticket(s) from the previous run", reaped)
+    # in memory, but the durable rows are not. Recovery fails the dead jobs,
+    # then replays the ones that were still queued.
+    recovery = services.recovery
+    if recovery is not None:
+        report = await recovery.resume()
+        services.recovered = report.resumed
+        if report.interrupted or report.abandoned:
+            logger.info(
+                "Recovery: %s interrupted, %s abandoned, %s queued for resume",
+                report.interrupted,
+                report.abandoned,
+                len(report.resumable),
+            )
+    else:
+        # Resume is switched off (RESUME_ON_STARTUP=0): close everything
+        # unfinished rather than leaving queued rows nobody will ever run.
+        report = services.tickets.recover_after_restart()
+        for job in report.resumable:
+            services.tickets.fail(
+                job.ticket_id,
+                kind=FailureKind.INTERRUPTED,
+                error="Resuming after a restart is disabled on this instance.",
+            )
+        closed = report.interrupted + report.abandoned + len(report.resumable)
+        if closed:
+            logger.info("Closed %s unfinished ticket(s) from the previous run", closed)
 
     try:
         await bot.set_my_commands(COMMANDS)
@@ -91,6 +114,7 @@ async def on_startup(services: Services, bot: Bot) -> None:
         ytdlp=_ytdlp_version(),
         impersonate=_impersonation(),
         admin=ADMIN_ID or "unset",
+        resumed=services.recovered,
     )
     logger.info(
         "Ready · v%s · admin=%s · cap=%sMB · force_join=%s%s",

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, Optional, Protocol, Sequence, runtime_checkable
 
 from linktofile.domain.models import (
     DownloadStatus,
@@ -11,6 +11,7 @@ from linktofile.domain.models import (
     MediaAsset,
     MediaInfo,
     Quality,
+    RecoveryReport,
 )
 
 
@@ -49,9 +50,31 @@ class TicketRepository(Protocol):
         *,
         filename: Optional[str] = None,
         size: Optional[int] = None,
+        quality: Optional[Quality] = None,
+        attempts: Optional[int] = None,
+        error: Optional[str] = None,
+        error_kind: Optional[str] = None,
     ) -> None: ...
 
     def recent(self, user_id: int, limit: int = 5) -> Sequence[DownloadTicket]: ...
+
+    def enqueue(self, ticket_id: int, quality: Quality) -> None:
+        """Commit the job to the durable queue (raises ``DuplicateJob``)."""
+        ...
+
+    def active_duplicate(self, user_id: int, url: str) -> Optional[DownloadTicket]: ...
+
+    def cancel(self, ticket_id: int) -> bool: ...
+
+    def fail(
+        self,
+        ticket_id: int,
+        *,
+        kind: Any = None,
+        error: str = "",
+    ) -> None: ...
+
+    def recover_after_restart(self) -> "RecoveryReport": ...
 
 
 @runtime_checkable
