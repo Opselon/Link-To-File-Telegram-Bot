@@ -312,7 +312,7 @@ class DownloadWorkflow:
                     f"({used // (1024 * 1024)} MB of temp files). Try again shortly."
                 )
 
-    # --- internals ----------------------------------------------------------
+    # --- cleanup ------------------------------------------------------------
     def _discard(self, ticket_id: int, asset: Optional[MediaAsset]) -> None:
         """Never leave a byte behind, whichever branch we took."""
         if asset is not None:
