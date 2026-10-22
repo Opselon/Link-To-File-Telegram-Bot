@@ -56,6 +56,7 @@ Docker: [get.docker.com](https://get.docker.com) · ffmpeg: `sudo apt install ff
 | 📊 **Live card** | Real-time progress bar, speed, ETA, one-tap cancel |
 | 🔁 **Recovery** | Retry / change quality / download again right on the result card |
 | 🛡 **Safety** | SSRF guard, per-user rate limit, hard size caps, temporary files deleted after upload |
+| 🌐 **Bilingual** | English and Persian (`/lang`, or tap 🌐 on the main menu); the choice is stored per user and survives restarts |
 
 ### What's new in v3.1 — smart preview & history
 
@@ -90,6 +91,7 @@ v3 is a full rewrite of the internals with the same UX, plus the features below.
 | `/cancel` | Stop your running downloads |
 | `/id` | Your Telegram ID / chat ID |
 | `/version` | Bot version + latest release link |
+| `/lang` | Pick the interface language (English / فارسی) |
 
 Admins (`ADMIN_ID`) get **🛠 Admin dashboard** (`/admin`): users, downloads today, queue load, disk space, plus the force-join controls and **📣 Broadcast**.
 

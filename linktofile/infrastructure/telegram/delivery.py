@@ -16,6 +16,7 @@ from aiogram.types import FSInputFile, InlineKeyboardMarkup, Message
 from linktofile.domain.errors import BotError
 from linktofile.domain.models import MediaAsset
 from linktofile.infrastructure.telegram import keyboards, texts
+from linktofile.infrastructure.telegram.i18n import DEFAULT_LANGUAGE, rlm
 from linktofile.infrastructure.telegram.upload import ProgressFSInputFile
 from linktofile.shared.telemetry import Timer, pipeline
 from linktofile.shared.utils import format_size, get_progress_bar
@@ -138,6 +139,9 @@ class TelegramDelivery:
         media: bool,
         card: Optional[Card] = None,
         admin_id: Optional[int] = None,
+        # The ticket owner's interface language, fetched once at construction —
+        # the live card outlives the handler that created it.
+        lang: str = DEFAULT_LANGUAGE,
     ) -> None:
         self._bot = bot
         self._message = message
@@ -145,21 +149,33 @@ class TelegramDelivery:
         self._header = header
         self._media = media
         self._admin_id = admin_id
+        self._lang = lang
         self.card = card or Card(message)
 
     # --- progress (called from the engine, possibly a worker thread) --------
     def progress(self, downloaded: int, total: int, speed: float, eta: float) -> None:
         text = texts.progress_text(
             self._header,
-            get_progress_bar(downloaded, total, speed, eta, stage="⬇️ Downloading"),
+            get_progress_bar(
+                downloaded,
+                total,
+                speed,
+                eta,
+                stage=texts.stage_text("downloading", lang=self._lang),
+            ),
+            lang=self._lang,
         )
-        self.card.schedule(text, markup=keyboards.progress_menu(self._ticket))
+        self.card.schedule(text, markup=keyboards.progress_menu(self._ticket, lang=self._lang))
 
     # --- Delivery port ------------------------------------------------------
     async def delivering(self, asset: MediaAsset) -> None:
+        card = (
+            f"{rlm(self._lang)}{self._header}\n\n"
+            + texts.uploading_text(format_size(asset.size), lang=self._lang)
+        )
         await self.card.show(
-            f"{self._header}\n\n⬆️ <b>Uploading</b> · {format_size(asset.size)}",
-            markup=keyboards.progress_menu(self._ticket),
+            card,
+            markup=keyboards.progress_menu(self._ticket, lang=self._lang),
             force=True,
         )
 
@@ -169,8 +185,8 @@ class TelegramDelivery:
             if asset.size > 5 * 1024 * 1024
             else FSInputFile(str(asset.path))
         )
-        caption = texts.done_caption(asset)
-        markup = keyboards.result_menu(self._ticket, media=self._media)
+        caption = texts.done_caption(asset, lang=self._lang)
+        markup = keyboards.result_menu(self._ticket, media=self._media, lang=self._lang)
         suffix = asset.suffix
         timer = Timer()
         pipeline(
@@ -209,8 +225,8 @@ class TelegramDelivery:
 
     async def failed(self, error: BotError) -> None:
         await self.card.show(
-            f"❌ <b>Couldn't finish that</b>\n\n{html.escape(str(error))}",
-            markup=keyboards.error_menu(self._ticket, media=self._media),
+            texts.failed_card_text(str(error), lang=self._lang),
+            markup=keyboards.error_menu(self._ticket, media=self._media, lang=self._lang),
             force=True,
         )
         pipeline(
@@ -247,13 +263,22 @@ class TelegramDelivery:
 
     async def cancelled(self) -> None:
         await self.card.show(
-            texts.cancel_text(), markup=keyboards.cancel_menu(self._ticket), force=True
+            texts.cancel_text(lang=self._lang),
+            markup=keyboards.cancel_menu(self._ticket, lang=self._lang),
+            force=True,
         )
 
     # --- internals ----------------------------------------------------------
     def _upload_progress(self, sent: int, total: int, speed: float, eta: float) -> None:
         text = texts.progress_text(
             f"{self._header}\n\n📦 {format_size(total)}",
-            get_progress_bar(sent, total, speed, eta, stage="⬆️ Uploading"),
+            get_progress_bar(
+                sent,
+                total,
+                speed,
+                eta,
+                stage=texts.stage_text("uploading", lang=self._lang),
+            ),
+            lang=self._lang,
         )
-        self.card.schedule(text, markup=keyboards.progress_menu(self._ticket))
+        self.card.schedule(text, markup=keyboards.progress_menu(self._ticket, lang=self._lang))

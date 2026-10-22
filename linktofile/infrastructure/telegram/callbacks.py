@@ -6,7 +6,7 @@ from aiogram.filters.callback_data import CallbackData
 
 
 class Nav(CallbackData, prefix="nav"):
-    action: str  # home | back | close
+    action: str  # home | back | close | lang
 
 
 class QualityCB(CallbackData, prefix="q"):
@@ -26,3 +26,8 @@ class AdminCB(CallbackData, prefix="adm"):
 
 class JoinCB(CallbackData, prefix="join"):
     action: str  # check
+
+
+class LangCB(CallbackData, prefix="lang"):
+    # No user id on purpose: a tap may only set the language of the tapper.
+    action: str  # en | fa

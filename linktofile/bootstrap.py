@@ -92,6 +92,7 @@ def build_application() -> Application:
     settings = SettingsService(settings_repo)
     membership = TelegramMembership(bot)
     access = AccessGuard(settings, membership)
+    prefs = UserPreferences(settings_repo)
 
     engine = EngineDownloadAdapter(policy)
     workflow = DownloadWorkflow(
@@ -135,7 +136,7 @@ def build_application() -> Application:
         limiter=RateLimiter(RATE_LIMIT_SECONDS),
         active=ActiveJobs(),
         preview=PreviewService(YtDlpProbe(), timeout=PREVIEW_TIMEOUT, wait=PREVIEW_WAIT),
-        prefs=UserPreferences(settings_repo),
+        prefs=prefs,
         cap_mb=UPLOAD_LIMIT_MB,
         admin_id=ADMIN_ID,
         version=VERSION,
@@ -147,8 +148,14 @@ def build_application() -> Application:
             queue=queue,
             workflow=workflow,
             active=services.active,
+            # A resumed ticket's owner may speak Persian: ship their language
+            # along so the fresh chat message lands in it.
             delivery_factory=lambda item: HeadlessDelivery(
-                bot, item.user_id, ticket_id=item.ticket_id, admin_id=ADMIN_ID
+                bot,
+                item.user_id,
+                ticket_id=item.ticket_id,
+                admin_id=ADMIN_ID,
+                lang=prefs.language(item.user_id),
             ),
             max_jobs=RESUME_MAX_JOBS,
         )

@@ -18,6 +18,7 @@ from linktofile.domain.models import MediaAsset
 from linktofile.infrastructure.telegram import keyboards, texts
 from linktofile.infrastructure.telegram.delivery import AUDIO_EXT, VIDEO_EXT
 from linktofile.infrastructure.telegram.flood import send_with_flood_wait
+from linktofile.infrastructure.telegram.i18n import DEFAULT_LANGUAGE
 from linktofile.shared.telemetry import Timer, pipeline
 
 logger = logging.getLogger(__name__)
@@ -33,11 +34,15 @@ class HeadlessDelivery:
         *,
         ticket_id: int,
         admin_id: Optional[int] = None,
+        # The ticket owner's interface language, fetched once at construction
+        # (see the delivery factory in bootstrap) — English when unknown.
+        lang: str = DEFAULT_LANGUAGE,
     ) -> None:
         self._bot = bot
         self._chat_id = chat_id
         self._ticket = ticket_id
         self._admin_id = admin_id
+        self._lang = lang
         self.sent: list[int] = []
 
     async def delivering(self, asset: MediaAsset) -> None:
@@ -45,8 +50,10 @@ class HeadlessDelivery:
         logger.info("Resumed ticket %s finished downloading, uploading", self._ticket)
 
     async def delivered(self, asset: MediaAsset) -> None:
-        caption = texts.done_caption(asset)
-        markup = keyboards.result_menu(self._ticket, media=asset.source != "direct")
+        caption = texts.done_caption(asset, lang=self._lang)
+        markup = keyboards.result_menu(
+            self._ticket, media=asset.source != "direct", lang=self._lang
+        )
         source = FSInputFile(str(asset.path))
         suffix = asset.suffix
         timer = Timer()
@@ -108,8 +115,7 @@ class HeadlessDelivery:
         try:
             await self._bot.send_message(
                 self._chat_id,
-                "❌ <b>A resumed download failed</b>\n\n"
-                f"<code>{error}</code>\n\nTap /history and retry the link if you still need it.",
+                texts.resumed_failed_text(str(error), lang=self._lang),
                 parse_mode="HTML",
             )
         except Exception as exc:  # noqa: BLE001 - never fatal
@@ -128,9 +134,9 @@ class HeadlessDelivery:
         try:
             await self._bot.send_message(
                 self._chat_id,
-                texts.cancel_text(),
+                texts.cancel_text(lang=self._lang),
                 parse_mode="HTML",
-                reply_markup=keyboards.cancel_menu(self._ticket),
+                reply_markup=keyboards.cancel_menu(self._ticket, lang=self._lang),
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("Could not report resumed cancellation: %s", exc)

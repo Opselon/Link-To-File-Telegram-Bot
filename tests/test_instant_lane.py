@@ -298,7 +298,7 @@ async def test_retrying_an_instagram_ticket_skips_the_picker(services):
     await services.queue.stop()
 
 
-async def test_an_instagram_failure_hides_the_quality_button():
+async def test_an_instagram_failure_hides_the_quality_button(services):
     message = FakeMessage()
     bot = FakeBot()
     delivery = TelegramDelivery(

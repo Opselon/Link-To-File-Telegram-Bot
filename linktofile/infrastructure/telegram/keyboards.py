@@ -11,9 +11,16 @@ from linktofile.infrastructure.telegram import texts
 from linktofile.infrastructure.telegram.callbacks import (
     AdminCB,
     JoinCB,
+    LangCB,
     Nav,
     QualityCB,
     TicketCB,
+)
+from linktofile.infrastructure.telegram.i18n import (
+    LANGUAGE_NAMES,
+    DEFAULT_LANGUAGE,
+    normalize,
+    t,
 )
 
 try:  # aiogram >= 3.25
@@ -39,28 +46,29 @@ def btn(text: str, *, style: str = "primary", **kwargs) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, **kwargs)
 
 
-def _back(action: str = "back") -> InlineKeyboardButton:
-    label = "🏠 Menu" if action == "home" else "⬅️ Back"
+def _back(action: str = "back", *, lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardButton:
+    label = t("btn_home", lang) if action == "home" else t("btn_back", lang)
     return btn(label, callback_data=Nav(action=action).pack(), style="primary")
 
 
-def _close() -> InlineKeyboardButton:
-    return btn("✖️ Close", callback_data=Nav(action="close").pack(), style="danger")
+def _close(*, lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardButton:
+    return btn(t("btn_close", lang), callback_data=Nav(action="close").pack(), style="danger")
 
 
-def main_menu(*, is_admin: bool = False) -> InlineKeyboardMarkup:
+def main_menu(*, is_admin: bool = False, lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
     rows = [
-        [btn("✨ What I can fetch", callback_data=Nav(action="sites").pack())],
+        [btn(t("btn_sites", lang), callback_data=Nav(action="sites").pack())],
         [
-            btn("📊 My stats", callback_data=Nav(action="stats").pack()),
-            btn("❓ How it works", callback_data=Nav(action="help").pack()),
+            btn(t("btn_stats", lang), callback_data=Nav(action="stats").pack()),
+            btn(t("btn_help", lang), callback_data=Nav(action="help").pack()),
         ],
+        [btn(t("btn_history", lang), callback_data=Nav(action="history").pack())],
     ]
-    rows.append([btn("🕘 History", callback_data=Nav(action="history").pack())])
     if is_admin:
-        rows.append([btn("🛠 Admin dashboard", callback_data=AdminCB(action="menu").pack(),
+        rows.append([btn(t("btn_admin", lang), callback_data=AdminCB(action="menu").pack(),
                          style="success")])
-    rows.append([btn("⭐️ Releases", url=texts.RELEASES_URL, style="primary")])
+    rows.append([btn(t("btn_language", lang), callback_data=Nav(action="lang").pack())])
+    rows.append([btn(t("btn_releases", lang), url=texts.RELEASES_URL, style="primary")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -70,14 +78,16 @@ def _quality_value(quality: Quality) -> str:
     return "best" if quality.height is None else str(quality.height)
 
 
-def quality_menu(ticket: int, *, default: Optional[Quality] = None) -> InlineKeyboardMarkup:
+def quality_menu(
+    ticket: int, *, default: Optional[Quality] = None, lang: str = DEFAULT_LANGUAGE
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if default is not None:
         # One tap for returning users; "Reset" drops the stored preference.
         rows.append(
             [
                 btn(
-                    f"⚡ My usual · {default.label}",
+                    t("btn_my_usual", lang, label=default.label),
                     style="success",
                     callback_data=QualityCB(
                         kind=default.kind.value,
@@ -86,15 +96,16 @@ def quality_menu(ticket: int, *, default: Optional[Quality] = None) -> InlineKey
                     ).pack(),
                 ),
                 btn(
-                    "↺ Reset",
+                    t("btn_reset", lang),
                     style="danger",
                     callback_data=QualityCB(kind="forget", value="-", ticket=ticket).pack(),
                 ),
             ]
         )
     rows.append(
-        [btn("⚡ Best quality", callback_data=QualityCB(kind="video", value="best",
-                                                       ticket=ticket).pack(), style="success")]
+        [btn(t("btn_best", lang), callback_data=QualityCB(kind="video", value="best",
+                                                          ticket=ticket).pack(),
+             style="success")]
     )
     for start in range(0, len(VIDEO_QUALITIES), 3):
         rows.append([
@@ -103,94 +114,121 @@ def quality_menu(ticket: int, *, default: Optional[Quality] = None) -> InlineKey
             for height, label in VIDEO_QUALITIES[start : start + 3]
         ])
     rows.append([
-        btn(f"🎵 {bitrate} kbps", style="success" if bitrate == 320 else "primary",
+        btn(t("btn_audio", lang, bitrate=bitrate), style="success" if bitrate == 320 else "primary",
             callback_data=QualityCB(kind="audio", value=str(bitrate), ticket=ticket).pack())
         for bitrate in AUDIO_QUALITIES[:3]
     ])
     rows.append([
-        btn(f"🎵 {bitrate} kbps", callback_data=QualityCB(kind="audio", value=str(bitrate),
-                                                          ticket=ticket).pack())
+        btn(t("btn_audio", lang, bitrate=bitrate), callback_data=QualityCB(kind="audio",
+                                                                          value=str(bitrate),
+                                                                          ticket=ticket).pack())
         for bitrate in AUDIO_QUALITIES[3:]
     ])
-    rows.append([_back()])
+    rows.append([_back(lang=lang)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def progress_menu(ticket: int) -> InlineKeyboardMarkup:
+def progress_menu(ticket: int, *, lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [btn("🛑 Cancel download", style="danger",
+            [btn(t("btn_cancel_download", lang), style="danger",
                  callback_data=TicketCB(action="cancel", ticket=ticket).pack())],
-            [_back("home")],
+            [_back("home", lang=lang)],
         ]
     )
 
 
-def result_menu(ticket: int, *, media: bool = False) -> InlineKeyboardMarkup:
+def result_menu(
+    ticket: int, *, media: bool = False, lang: str = DEFAULT_LANGUAGE
+) -> InlineKeyboardMarkup:
     rows = [
         [
-            btn("🔁 Download again", style="success",
+            btn(t("btn_again", lang), style="success",
                 callback_data=TicketCB(action="again", ticket=ticket).pack()),
         ]
     ]
     if media:
         rows[0].append(
-            btn("🎚 Change quality", callback_data=TicketCB(action="quality", ticket=ticket).pack())
+            btn(t("btn_change_quality", lang),
+                callback_data=TicketCB(action="quality", ticket=ticket).pack())
         )
-    rows.append([_back("home"), _close()])
+    rows.append([_back("home", lang=lang), _close(lang=lang)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def error_menu(ticket: int, *, media: bool = True) -> InlineKeyboardMarkup:
+def error_menu(
+    ticket: int, *, media: bool = True, lang: str = DEFAULT_LANGUAGE
+) -> InlineKeyboardMarkup:
     rows = [
         [
-            btn("🔄 Try again", style="success",
+            btn(t("btn_retry", lang), style="success",
                 callback_data=TicketCB(action="again", ticket=ticket).pack()),
         ]
     ]
     if media:
         # Instant-lane tickets have no quality ladder, so the button is noise.
         rows[0].append(
-            btn("🎚 Quality", callback_data=TicketCB(action="quality", ticket=ticket).pack())
+            btn(t("btn_quality", lang), callback_data=TicketCB(action="quality", ticket=ticket).pack())
         )
-    rows.append([_back("home")])
+    rows.append([_back("home", lang=lang)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def cancel_menu(ticket: int) -> InlineKeyboardMarkup:
+def cancel_menu(ticket: int, *, lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [btn("🔄 Start over", style="success",
+            [btn(t("btn_start_over", lang), style="success",
                  callback_data=TicketCB(action="again", ticket=ticket).pack())],
-            [_back("home")],
+            [_back("home", lang=lang)],
         ]
     )
 
 
-def help_menu() -> InlineKeyboardMarkup:
+def help_menu(*, lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [btn("✨ Supported sites", callback_data=Nav(action="sites").pack(), style="success")],
-            [_back("home")],
+            [btn(t("btn_supported", lang), callback_data=Nav(action="sites").pack(), style="success")],
+            [_back("home", lang=lang)],
         ]
     )
 
 
-def sites_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[_back()]])
+def sites_menu(*, lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[_back(lang=lang)]])
 
 
-def stats_menu() -> InlineKeyboardMarkup:
+def stats_menu(*, lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [btn("🔄 Refresh", style="success", callback_data=Nav(action="stats").pack())],
-            [_back("home")],
+            [btn(t("btn_refresh", lang), style="success", callback_data=Nav(action="stats").pack())],
+            [_back("home", lang=lang)],
         ]
     )
 
 
-def admin_menu(policy: ForceJoinPolicy, *, has_channel: bool = True) -> InlineKeyboardMarkup:
-    toggle_label = "🔓 Force join: ON" if policy.enabled else "🔒 Force join: OFF"
+def language_menu(*, lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
+    """The /lang screen: both languages, the current one highlighted."""
+    current = normalize(lang)
+    rows = [
+        [
+            btn(
+                LANGUAGE_NAMES[code],
+                style="success" if code == current else "primary",
+                callback_data=LangCB(action=code).pack(),
+            )
+            for code in ("en", "fa")
+        ]
+    ]
+    rows.append([_back("home", lang=lang), _close(lang=lang)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_menu(
+    policy: ForceJoinPolicy, *, has_channel: bool = True, lang: str = DEFAULT_LANGUAGE
+) -> InlineKeyboardMarkup:
+    toggle_label = (
+        t("btn_join_on", lang) if policy.enabled else t("btn_join_off", lang)
+    )
     rows = [
         [
             btn(toggle_label, style="danger" if policy.enabled else "success",
@@ -198,53 +236,67 @@ def admin_menu(policy: ForceJoinPolicy, *, has_channel: bool = True) -> InlineKe
         ],
         [
             btn(
-                f"📢 Channel: {policy.channel or 'not set'}",
+                t("btn_channel", lang, channel=policy.channel or t("channel_not_set", lang)),
                 callback_data=AdminCB(action="channel").pack(),
             )
         ],
         [
-            btn("📣 Broadcast", callback_data=AdminCB(action="broadcast").pack()),
-            btn("🧹 Clear join cache", callback_data=AdminCB(action="cache").pack()),
+            btn(t("btn_broadcast", lang), callback_data=AdminCB(action="broadcast").pack()),
+            btn(t("btn_clear_cache", lang), callback_data=AdminCB(action="cache").pack()),
         ],
         [
-            btn("📦 Queue", callback_data=AdminCB(action="queue").pack()),
-            btn("⚠️ Errors", callback_data=AdminCB(action="errors").pack()),
+            btn(t("btn_queue", lang), callback_data=AdminCB(action="queue").pack()),
+            btn(t("btn_errors", lang), callback_data=AdminCB(action="errors").pack()),
         ],
-        [btn("🔄 Refresh", callback_data=AdminCB(action="menu").pack(), style="success")],
-        [_back("home")],
+        [btn(t("btn_refresh", lang), callback_data=AdminCB(action="menu").pack(), style="success")],
+        [_back("home", lang=lang)],
     ]
     if not has_channel:
-        rows.insert(1, [btn("📢 Set a channel first", callback_data=AdminCB(action="channel").pack(),
+        rows.insert(1, [btn(t("btn_set_channel", lang), callback_data=AdminCB(action="channel").pack(),
                             style="danger")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def admin_back_menu() -> InlineKeyboardMarkup:
+def admin_back_menu(*, lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
     """Sub-view footer so every admin page can get back to the dashboard."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [btn("🔄 Refresh", callback_data=AdminCB(action="refresh").pack(), style="success")],
-            [btn("⬅️ Back", callback_data=AdminCB(action="menu").pack()), _close()],
+            [btn(t("btn_refresh", lang), callback_data=AdminCB(action="refresh").pack(),
+                 style="success")],
+            [btn(t("btn_back", lang), callback_data=AdminCB(action="menu").pack()),
+             _close(lang=lang)],
         ]
     )
 
 
-def join_menu(policy: ForceJoinPolicy, *, invite_url: Optional[str] = None) -> InlineKeyboardMarkup:
+def join_menu(
+    policy: ForceJoinPolicy,
+    *,
+    invite_url: Optional[str] = None,
+    lang: str = DEFAULT_LANGUAGE,
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     target = invite_url or policy.invite_url
     if target:
-        rows.append([btn("📢 Join channel", url=target, style="success")])
-    rows.append([btn("✅ I joined", callback_data=JoinCB(action="check").pack(), style="success")])
-    rows.append([_back("home")])
+        rows.append([btn(t("btn_join_channel", lang), url=target, style="success")])
+    rows.append([btn(t("btn_i_joined", lang), callback_data=JoinCB(action="check").pack(),
+                     style="success")])
+    rows.append([_back("home", lang=lang)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def channel_set_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[_back()]])
+def channel_set_menu(*, lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[_back(lang=lang)]])
 
 
-def history_menu(tickets: Sequence[DownloadTicket]) -> InlineKeyboardMarkup:
-    """One replay button per past download, plus a way home."""
+def history_menu(
+    tickets: Sequence[DownloadTicket], *, lang: str = DEFAULT_LANGUAGE
+) -> InlineKeyboardMarkup:
+    """One replay button per past download, plus a way home.
+
+    The ticket label is the filename (already escaped) and the 🔁 replay mark is
+    language-neutral, so the row itself needs no catalog entry.
+    """
     rows: list[list[InlineKeyboardButton]] = [
         [
             btn(
@@ -254,18 +306,18 @@ def history_menu(tickets: Sequence[DownloadTicket]) -> InlineKeyboardMarkup:
         ]
         for ticket in tickets[:8]
     ]
-    rows.append([_back("home")])
+    rows.append([_back("home", lang=lang)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def broadcast_confirm_menu() -> InlineKeyboardMarkup:
+def broadcast_confirm_menu(*, lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                btn("📣 Send to everyone", style="success",
+                btn(t("btn_send_all", lang), style="success",
                     callback_data=AdminCB(action="send").pack()),
-                btn("✖️ Abort", style="danger", callback_data=AdminCB(action="abort").pack()),
+                btn(t("btn_abort", lang), style="danger", callback_data=AdminCB(action="abort").pack()),
             ],
-            [_back("home")],
+            [_back("home", lang=lang)],
         ]
     )

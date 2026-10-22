@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import html
 import logging
 import shutil
-from typing import Optional
+from typing import Optional, Tuple
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from linktofile.application.container import Services
 from linktofile.application.downloads import DownloadJob
@@ -35,11 +34,13 @@ from linktofile.infrastructure.telegram import keyboards, texts
 from linktofile.infrastructure.telegram.callbacks import (
     AdminCB,
     JoinCB,
+    LangCB,
     Nav,
     QualityCB,
     TicketCB,
 )
 from linktofile.infrastructure.telegram.delivery import TelegramDelivery
+from linktofile.infrastructure.telegram.i18n import DEFAULT_LANGUAGE, normalize, t
 from linktofile.infrastructure.telegram.states import AdminFlow
 from linktofile.shared.security import ensure_public_url
 from linktofile.shared.telemetry import pipeline
@@ -53,12 +54,24 @@ _BROADCAST_SPACING = 0.05
 
 
 # --- helpers ----------------------------------------------------------------
-def _header(quality: Optional[Quality]) -> str:
-    if quality is None or quality.kind is QualityKind.VIDEO and quality.height is None:
-        return "🔗 <b>Fetching your file</b>"
-    if quality.kind is QualityKind.AUDIO:
-        return f"🎵 <b>Audio · {quality.label}</b>"
-    return f"🎬 <b>Video · {quality.label}</b>"
+def _lang(services: Services, user_id: int) -> str:
+    """The user's interface language; a preference hiccup never breaks a reply."""
+    try:
+        return services.prefs.language(user_id)
+    except (AttributeError, TypeError, ValueError):
+        return DEFAULT_LANGUAGE
+
+
+def _adopt_telegram_language(services: Services, user) -> None:
+    """First contact: store Telegram's language hint, but never a later override."""
+    try:
+        if services.prefs.has_language(user.id):
+            return
+        hint = normalize(getattr(user, "language_code", None))
+        if hint != DEFAULT_LANGUAGE:
+            services.prefs.set_language(user.id, hint)
+    except (AttributeError, TypeError, ValueError):
+        return
 
 
 def _quality(kind: str, value: str) -> Optional[Quality]:
@@ -77,34 +90,48 @@ def _own_ticket(services: Services, ticket_id: int, user_id: int) -> Optional[Do
     return ticket
 
 
-async def _show_menu(message: Message, services: Services, state: Optional[FSMContext]) -> None:
+async def _show_menu(
+    message: Message,
+    services: Services,
+    state: Optional[FSMContext],
+    *,
+    lang: Optional[str] = None,
+) -> None:
     if state is not None:
         await state.clear()
+    # On a callback the message's from_user is the bot, so callers that know the
+    # real user (like the join gate) hand their language in.
+    lang = lang if lang is not None else _lang(services, message.from_user.id)
     is_admin = services.is_admin(message.chat.id)
     await message.answer(
-        texts.welcome(message.from_user, is_admin=is_admin, cap_mb=services.cap_mb),
+        texts.welcome(message.from_user, is_admin=is_admin, cap_mb=services.cap_mb, lang=lang),
         parse_mode="HTML",
-        reply_markup=keyboards.main_menu(is_admin=is_admin),
+        reply_markup=keyboards.main_menu(is_admin=is_admin, lang=lang),
         disable_web_page_preview=True,
     )
 
 
-async def _join_wall(message: Message, services: Services) -> None:
+async def _join_wall(
+    message: Message, services: Services, *, lang: Optional[str] = None
+) -> None:
+    lang = lang if lang is not None else _lang(services, message.from_user.id)
     policy = services.settings.force_join()
     target = policy.invite_url
     await message.answer(
-        texts.join_text(policy),
+        texts.join_text(policy, lang=lang),
         parse_mode="HTML",
-        reply_markup=keyboards.join_menu(policy, invite_url=target or None),
+        reply_markup=keyboards.join_menu(policy, invite_url=target or None, lang=lang),
         disable_web_page_preview=True,
     )
 
 
-async def _enforce_gate(message: Message, services: Services) -> bool:
+async def _enforce_gate(
+    message: Message, services: Services, *, lang: Optional[str] = None
+) -> bool:
     """Returns True when the user must be stopped here (join wall shown)."""
     if await services.access.allows(message.from_user.id):
         return False
-    await _join_wall(message, services)
+    await _join_wall(message, services, lang=lang)
     return True
 
 
@@ -114,10 +141,15 @@ async def _show_quality_card(
     *,
     default: Optional[Quality],
     info: Optional[MediaInfo],
+    lang: str = DEFAULT_LANGUAGE,
 ) -> None:
     """Preview card when metadata is available, the plain picker otherwise."""
-    caption = texts.preview_caption(info) if info is not None else "🎚 <b>Pick a quality</b>"
-    markup = keyboards.quality_menu(ticket.id, default=default)
+    caption = (
+        texts.preview_caption(info, lang=lang)
+        if info is not None
+        else texts.pick_quality_text(lang=lang)
+    )
+    markup = keyboards.quality_menu(ticket.id, default=default, lang=lang)
     if info is not None and info.has_thumbnail:
         try:
             await message.answer_photo(
@@ -138,10 +170,11 @@ async def _enqueue(
     message: Message,
     *,
     media: bool,
+    lang: str = DEFAULT_LANGUAGE,
     header: Optional[str] = None,
     note: Optional[str] = None,
 ) -> bool:
-    header = header or _header(quality)
+    header = header or texts.quality_header(quality, lang=lang)
     # Durable first: the row becomes 'queued' with its quality committed before
     # the job exists in memory, so a crash here is recoverable, and the partial
     # unique index rejects a second live job for the same (user, url).
@@ -153,9 +186,11 @@ async def _enqueue(
         )
         existing = services.tickets.active_duplicate(ticket.user_id, ticket.url)
         await message.answer(
-            texts.duplicate_text(existing.id if existing else ticket.id),
+            texts.duplicate_text(existing.id if existing else ticket.id, lang=lang),
             parse_mode="HTML",
-            reply_markup=keyboards.progress_menu(existing.id if existing else ticket.id),
+            reply_markup=keyboards.progress_menu(
+                existing.id if existing else ticket.id, lang=lang
+            ),
         )
         pipeline("link.duplicate", ticket=ticket.id, user=ticket.user_id, host=url_host(ticket.url))
         return False
@@ -167,6 +202,7 @@ async def _enqueue(
         header=header,
         media=media,
         admin_id=getattr(services, "admin_id", None),
+        lang=lang,
     )
     event = services.active.open(ticket.user_id, ticket.id)
     job = DownloadJob(ticket_id=ticket.id, user_id=ticket.user_id, url=ticket.url, quality=quality)
@@ -187,19 +223,19 @@ async def _enqueue(
             ticket.id, kind=FailureKind.QUEUE_FULL, error="Not enough queue capacity."
         )
         await message.answer(
-            texts.too_many_jobs_text() if services.queue.load(ticket.user_id)
-            else texts.queue_full_text(),
+            texts.too_many_jobs_text(lang=lang) if services.queue.load(ticket.user_id)
+            else texts.queue_full_text(lang=lang),
             parse_mode="HTML",
         )
         return False
 
-    card = texts.queued_text(header, position)
+    card = texts.queued_text(header, position, lang=lang)
     if note:
         card += f"\n\n{note}"
     await message.answer(
         card,
         parse_mode="HTML",
-        reply_markup=keyboards.progress_menu(ticket.id),
+        reply_markup=keyboards.progress_menu(ticket.id, lang=lang),
     )
     return True
 
@@ -209,56 +245,79 @@ async def _enqueue(
 async def cmd_start(message: Message, services: Services, state: FSMContext) -> None:
     await state.clear()
     services.users.register(message.from_user.id)
+    _adopt_telegram_language(services, message.from_user)
     await _show_menu(message, services, None)
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message, services: Services) -> None:
+    lang = _lang(services, message.from_user.id)
     if await _enforce_gate(message, services):
         return
     await message.answer(
-        texts.help_text(services.cap_mb), parse_mode="HTML", reply_markup=keyboards.help_menu()
+        texts.help_text(services.cap_mb, lang=lang),
+        parse_mode="HTML",
+        reply_markup=keyboards.help_menu(lang=lang),
     )
 
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message, services: Services) -> None:
+    lang = _lang(services, message.from_user.id)
     if await _enforce_gate(message, services):
         return
     stats = services.stats.user(message.from_user.id)
     await message.answer(
-        texts.stats_text(stats), parse_mode="HTML", reply_markup=keyboards.stats_menu()
+        texts.stats_text(stats, lang=lang),
+        parse_mode="HTML",
+        reply_markup=keyboards.stats_menu(lang=lang),
     )
 
 
 @router.message(Command("history"))
 async def cmd_history(message: Message, services: Services) -> None:
+    lang = _lang(services, message.from_user.id)
     if await _enforce_gate(message, services):
         return
     items = services.tickets.recent(message.from_user.id, limit=8)
     await message.answer(
-        texts.history_text(items),
+        texts.history_text(items, lang=lang),
         parse_mode="HTML",
-        reply_markup=keyboards.history_menu(items),
+        reply_markup=keyboards.history_menu(items, lang=lang),
         disable_web_page_preview=True,
     )
 
 
 @router.message(Command("id"))
-async def cmd_id(message: Message) -> None:
-    await message.answer(f"🆔 <code>{message.from_user.id}</code>", parse_mode="HTML")
+async def cmd_id(message: Message, services: Services) -> None:
+    lang = _lang(services, message.from_user.id)
+    await message.answer(
+        texts.your_id_text(message.from_user.id, lang=lang), parse_mode="HTML"
+    )
 
 
 @router.message(Command("version"))
 async def cmd_version(message: Message, services: Services) -> None:
-    await message.answer(f"⚡ <b>{texts.BRAND}</b> v{services.version}", parse_mode="HTML")
+    lang = _lang(services, message.from_user.id)
+    await message.answer(texts.version_text(services.version, lang=lang), parse_mode="HTML")
+
+
+@router.message(Command("lang"))
+async def cmd_lang(message: Message, services: Services) -> None:
+    lang = _lang(services, message.from_user.id)
+    await message.answer(
+        texts.language_text(lang=lang),
+        parse_mode="HTML",
+        reply_markup=keyboards.language_menu(lang=lang),
+    )
 
 
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, services: Services) -> None:
+    lang = _lang(services, message.from_user.id)
     live = services.active.of_user(message.from_user.id)
     if not live:
-        await message.answer("Nothing is running right now. 🌤", parse_mode="HTML")
+        await message.answer(texts.nothing_running_text(lang=lang), parse_mode="HTML")
         return
     for ticket_id in live:
         services.queue.cancel(ticket_id)
@@ -266,7 +325,7 @@ async def cmd_cancel(message: Message, services: Services) -> None:
         event = services.active.event(ticket_id)
         if event:
             event.set()
-    await message.answer(texts.cancel_text(), parse_mode="HTML")
+    await message.answer(texts.cancel_text(lang=lang), parse_mode="HTML")
 
 
 # --- links ------------------------------------------------------------------
@@ -276,6 +335,7 @@ async def cmd_cancel(message: Message, services: Services) -> None:
 async def on_text(message: Message, services: Services) -> None:
     text = (message.text or "").strip()
     user_id = message.from_user.id
+    lang = _lang(services, user_id)
 
     if "http" not in text:
         await _show_menu(message, services, None)
@@ -292,11 +352,13 @@ async def on_text(message: Message, services: Services) -> None:
     )
     if not is_valid_url(url):
         pipeline("link.rejected", user=user_id, host=host, reason="invalid")
-        await message.answer("🤔 That doesn't look like a link. Try again?", parse_mode="HTML")
+        await message.answer(
+            texts.not_a_link_text(lang=lang), parse_mode="HTML"
+        )
         return
     if not is_safe_url(url):
         pipeline("link.rejected", user=user_id, host=host, reason="unsafe")
-        await message.answer(texts.blocked_url_text(), parse_mode="HTML")
+        await message.answer(texts.blocked_url_text(lang=lang), parse_mode="HTML")
         return
     # Second SSRF layer: a public-looking hostname can still resolve to
     # 127.0.0.1 or a cloud metadata address. This also rejects odd numeric
@@ -305,17 +367,18 @@ async def on_text(message: Message, services: Services) -> None:
         await ensure_public_url(url)
     except (UnsafeUrl, InvalidUrl) as exc:
         pipeline("link.rejected", user=user_id, host=host, reason="ssrf", detail=str(exc)[:120])
-        await message.answer(texts.blocked_url_text(), parse_mode="HTML")
+        await message.answer(texts.blocked_url_text(lang=lang), parse_mode="HTML")
         return
     except Exception as exc:  # noqa: BLE001 - a resolver hiccup must not 500 the user
         logger.debug("SSRF resolution check skipped for %s: %s", host, exc)
     if not services.limiter.hit(user_id):
         pipeline("link.rejected", user=user_id, host=host, reason="rate_limited")
         await message.answer(
-            texts.rate_limited_text(services.limiter.remaining(user_id)), parse_mode="HTML"
+            texts.rate_limited_text(services.limiter.remaining(user_id), lang=lang),
+            parse_mode="HTML",
         )
         return
-    if await _enforce_gate(message, services):
+    if await _enforce_gate(message, services, lang=lang):
         pipeline("link.rejected", user=user_id, host=host, reason="force_join")
         return
 
@@ -333,8 +396,9 @@ async def on_text(message: Message, services: Services) -> None:
             Quality.video(None),
             message,
             media=False,
-            header=texts.instant_header(host),
-            note=texts.instant_note(host),
+            lang=lang,
+            header=texts.instant_header(host, lang=lang),
+            note=texts.instant_note(host, lang=lang),
         )
         return
 
@@ -342,11 +406,11 @@ async def on_text(message: Message, services: Services) -> None:
         default = services.prefs.get(user_id)
         info = await services.preview.describe(url) if is_media_site(url) else None
         pipeline("route.picker", ticket=ticket.id, host=host, preview=info is not None)
-        await _show_quality_card(message, ticket, default=default, info=info)
+        await _show_quality_card(message, ticket, default=default, info=info, lang=lang)
         return
 
     pipeline("route.direct", ticket=ticket.id, host=host)
-    await _enqueue(services, ticket, Quality.video(None), message, media=False)
+    await _enqueue(services, ticket, Quality.video(None), message, media=False, lang=lang)
 
 
 # --- quality ----------------------------------------------------------------
@@ -354,50 +418,51 @@ async def on_text(message: Message, services: Services) -> None:
 async def on_quality(
     callback: CallbackQuery, callback_data: QualityCB, services: Services
 ) -> None:
+    lang = _lang(services, callback.from_user.id)
     if callback_data.kind == "forget":
         services.prefs.clear(callback.from_user.id)
         if callback.message is not None:
-            markup = keyboards.quality_menu(callback_data.ticket)
+            markup = keyboards.quality_menu(callback_data.ticket, lang=lang)
             # The picker may live on a photo card: editing "text" there fails
             # on Telegram, so the caption is the thing to rewrite.
             try:
                 if getattr(callback.message, "photo", None):
                     await callback.message.edit_caption(
-                        caption="🎚 <b>Pick a quality</b>",
+                        caption=texts.pick_quality_text(lang=lang),
                         parse_mode="HTML",
                         reply_markup=markup,
                     )
                 else:
                     await callback.message.edit_text(
-                        "🎚 <b>Pick a quality</b>",
+                        texts.pick_quality_text(lang=lang),
                         parse_mode="HTML",
                         reply_markup=markup,
                     )
             except TelegramBadRequest as exc:
                 logger.debug("Could not refresh the picker after reset: %s", exc)
-        await callback.answer("Preference cleared ↺")
+        await callback.answer(t("pref_cleared", lang))
         return
 
     quality = _quality(callback_data.kind, callback_data.value)
     if quality is None:
-        await callback.answer("Bad selection.", show_alert=True)
+        await callback.answer(t("bad_selection", lang), show_alert=True)
         return
     ticket = _own_ticket(services, callback_data.ticket, callback.from_user.id)
     if ticket is None:
-        await callback.answer(texts.missing_download_text(), show_alert=True)
+        await callback.answer(texts.missing_download_text(lang=lang), show_alert=True)
         return
     if callback.message is None:
         await callback.answer()
         return
-    if await _enforce_gate(callback.message, services):
-        await callback.answer("Join the channel first ⚠️", show_alert=True)
+    if await _enforce_gate(callback.message, services, lang=lang):
+        await callback.answer(t("join_first", lang), show_alert=True)
         return
 
     media = is_media_url(ticket.url) or quality.kind is QualityKind.AUDIO
-    ok = await _enqueue(services, ticket, quality, callback.message, media=media)
+    ok = await _enqueue(services, ticket, quality, callback.message, media=media, lang=lang)
     if ok:
         services.prefs.set(callback.from_user.id, quality)
-        await callback.answer("Added to the queue ⚡")
+        await callback.answer(t("added_to_queue", lang))
 
 
 # --- ticket actions ---------------------------------------------------------
@@ -405,6 +470,7 @@ async def on_quality(
 async def on_ticket(
     callback: CallbackQuery, callback_data: TicketCB, services: Services
 ) -> None:
+    lang = _lang(services, callback.from_user.id)
     if callback.message is None:
         await callback.answer()
         return
@@ -416,7 +482,7 @@ async def on_ticket(
 
     ticket = _own_ticket(services, callback_data.ticket, callback.from_user.id)
     if ticket is None:
-        await callback.answer(texts.missing_download_text(), show_alert=True)
+        await callback.answer(texts.missing_download_text(lang=lang), show_alert=True)
         return
 
     if callback_data.action == "cancel":
@@ -428,9 +494,11 @@ async def on_ticket(
         if event:
             event.set()
         stopped = in_memory or in_db
-        await callback.answer("🛑 Cancelled" if stopped else "Nothing left to stop")
+        await callback.answer(t("stopped_toast", lang) if stopped else t("nothing_to_stop", lang))
         await callback.message.edit_text(
-            texts.cancel_text(), parse_mode="HTML", reply_markup=keyboards.cancel_menu(ticket.id)
+            texts.cancel_text(lang=lang),
+            parse_mode="HTML",
+            reply_markup=keyboards.cancel_menu(ticket.id, lang=lang),
         )
         return
 
@@ -444,23 +512,24 @@ async def on_ticket(
                 Quality.video(None),
                 callback.message,
                 media=False,
-                header=texts.instant_header(url_host(ticket.url)),
+                lang=lang,
+                header=texts.instant_header(url_host(ticket.url), lang=lang),
             )
-            await callback.answer("⚡ Auto quality — fetching again")
+            await callback.answer(t("auto_quality_again", lang))
             return
         await callback.message.edit_text(
-            "🎚 <b>Pick another quality</b>",
+            texts.pick_quality_other_text(lang=lang),
             parse_mode="HTML",
             reply_markup=keyboards.quality_menu(
-                ticket.id, default=services.prefs.get(callback.from_user.id)
+                ticket.id, default=services.prefs.get(callback.from_user.id), lang=lang
             ),
         )
         await callback.answer()
         return
 
     # again
-    if await _enforce_gate(callback.message, services):
-        await callback.answer("Join the channel first ⚠️", show_alert=True)
+    if await _enforce_gate(callback.message, services, lang=lang):
+        await callback.answer(t("join_first", lang), show_alert=True)
         return
     fresh = services.tickets.create(ticket.user_id, ticket.url)
     if is_instant_url(ticket.url):
@@ -471,21 +540,22 @@ async def on_ticket(
             Quality.video(None),
             callback.message,
             media=False,
-            header=texts.instant_header(url_host(ticket.url)),
+            lang=lang,
+            header=texts.instant_header(url_host(ticket.url), lang=lang),
         )
         await callback.answer()
         return
     if is_media_url(ticket.url):
         await callback.message.edit_text(
-            "🎚 <b>Pick a quality</b>",
+            texts.pick_quality_text(lang=lang),
             parse_mode="HTML",
             reply_markup=keyboards.quality_menu(
-                fresh.id, default=services.prefs.get(callback.from_user.id)
+                fresh.id, default=services.prefs.get(callback.from_user.id), lang=lang
             ),
         )
         await callback.answer()
         return
-    await _enqueue(services, fresh, Quality.video(None), callback.message, media=False)
+    await _enqueue(services, fresh, Quality.video(None), callback.message, media=False, lang=lang)
     await callback.answer()
 
 
@@ -506,27 +576,39 @@ async def on_nav(
     # Leaving the screen abandons any half-finished admin flow (channel, broadcast)
     # so the next plain-text message is never swallowed by a stale state.
     await state.clear()
+    lang = _lang(services, callback.from_user.id)
+    view: Tuple[str, InlineKeyboardMarkup]
 
     if action == "sites":
-        text, markup = texts.sites_text(), keyboards.sites_menu()
+        view = texts.sites_text(lang=lang), keyboards.sites_menu(lang=lang)
     elif action == "help":
-        text, markup = texts.help_text(services.cap_mb), keyboards.help_menu()
+        view = texts.help_text(services.cap_mb, lang=lang), keyboards.help_menu(lang=lang)
     elif action == "stats":
-        text, markup = (
-            texts.stats_text(services.stats.user(callback.from_user.id)),
-            keyboards.stats_menu(),
+        view = (
+            texts.stats_text(services.stats.user(callback.from_user.id), lang=lang),
+            keyboards.stats_menu(lang=lang),
         )
     elif action == "history":
         items = services.tickets.recent(callback.from_user.id, limit=8)
-        text, markup = texts.history_text(items), keyboards.history_menu(items)
-    else:  # home / back
-        text = texts.welcome(
-            callback.from_user,
-            is_admin=services.is_admin(callback.from_user.id),
-            cap_mb=services.cap_mb,
+        view = (
+            texts.history_text(items, lang=lang),
+            keyboards.history_menu(items, lang=lang),
         )
-        markup = keyboards.main_menu(is_admin=services.is_admin(callback.from_user.id))
+    elif action == "lang":
+        view = texts.language_text(lang=lang), keyboards.language_menu(lang=lang)
+    else:  # home / back
+        is_admin = services.is_admin(callback.from_user.id)
+        view = (
+            texts.welcome(
+                callback.from_user,
+                is_admin=is_admin,
+                cap_mb=services.cap_mb,
+                lang=lang,
+            ),
+            keyboards.main_menu(is_admin=is_admin, lang=lang),
+        )
 
+    text, markup = view
     try:
         await callback.message.edit_text(
             text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True
@@ -536,8 +618,30 @@ async def on_nav(
     await callback.answer()
 
 
+# --- language ---------------------------------------------------------------
+@router.callback_query(LangCB.filter())
+async def on_lang(
+    callback: CallbackQuery, callback_data: LangCB, services: Services
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    # The payload carries no user id, so a tap can only ever set the language of
+    # the person who tapped it — a per-user preference by design.
+    lang = services.prefs.set_language(callback.from_user.id, callback_data.action)
+    try:
+        await callback.message.edit_text(
+            texts.language_text(lang=lang),
+            parse_mode="HTML",
+            reply_markup=keyboards.language_menu(lang=lang),
+        )
+    except Exception:  # noqa: BLE001 - identical content is fine
+        pass
+    await callback.answer(t("language_saved", lang))
+
+
 # --- admin dashboard --------------------------------------------------------
-def _admin_view(services: Services) -> str:
+def _admin_view(services: Services, *, lang: str = DEFAULT_LANGUAGE) -> str:
     stats = services.stats.global_()
     snapshot = services.queue.snapshot()
     free = shutil.disk_usage(services.workflow.temp_dir).free
@@ -554,30 +658,34 @@ def _admin_view(services: Services) -> str:
         uptime=uptime_text(),
         failures_today=int(stats.get("errors", 0) or 0),
         resumed=recovered,
+        lang=lang,
     )
 
 
-def _admin_queue_view(services: Services) -> str:
+def _admin_queue_view(services: Services, *, lang: str = DEFAULT_LANGUAGE) -> str:
     tickets = services.tickets.queue_contents()
     live = {ticket_id: phase for ticket_id, phase in services.queue.live_phases().items()}
-    return texts.admin_queue_text(tickets, live=live)
+    return texts.admin_queue_text(tickets, live=live, lang=lang)
 
 
-def _admin_errors_view(services: Services) -> str:
-    return texts.admin_errors_text(services.tickets.recent_failures())
+def _admin_errors_view(services: Services, *, lang: str = DEFAULT_LANGUAGE) -> str:
+    return texts.admin_errors_text(services.tickets.recent_failures(), lang=lang)
 
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, services: Services, state: FSMContext) -> None:
+    lang = _lang(services, message.from_user.id)
     if not services.is_admin(message.from_user.id):
-        await message.answer("🚫 Admins only.")
+        await message.answer(texts.admin_only_text(lang=lang), parse_mode="HTML")
         return
     await state.clear()
     policy = services.settings.force_join()
     await message.answer(
-        _admin_view(services),
+        _admin_view(services, lang=lang),
         parse_mode="HTML",
-        reply_markup=keyboards.admin_menu(policy, has_channel=bool(policy.channel)),
+        reply_markup=keyboards.admin_menu(
+            policy, has_channel=bool(policy.channel), lang=lang
+        ),
     )
 
 
@@ -585,8 +693,9 @@ async def cmd_admin(message: Message, services: Services, state: FSMContext) -> 
 async def on_admin(
     callback: CallbackQuery, callback_data: AdminCB, services: Services, state: FSMContext
 ) -> None:
+    lang = _lang(services, callback.from_user.id)
     if not services.is_admin(callback.from_user.id):
-        await callback.answer("Admins only.", show_alert=True)
+        await callback.answer(t("admin_only_toast", lang), show_alert=True)
         return
     if callback.message is None:
         await callback.answer()
@@ -595,48 +704,47 @@ async def on_admin(
     action = callback_data.action
     if action == "queue":
         await callback.message.edit_text(
-            _admin_queue_view(services),
+            _admin_queue_view(services, lang=lang),
             parse_mode="HTML",
-            reply_markup=keyboards.admin_back_menu(),
+            reply_markup=keyboards.admin_back_menu(lang=lang),
         )
         await callback.answer()
         return
     if action == "errors":
         await callback.message.edit_text(
-            _admin_errors_view(services),
+            _admin_errors_view(services, lang=lang),
             parse_mode="HTML",
-            reply_markup=keyboards.admin_back_menu(),
+            reply_markup=keyboards.admin_back_menu(lang=lang),
         )
         await callback.answer()
         return
     if action == "toggle":
         policy = services.settings.toggle_force_join()
         if policy.enabled and not policy.channel:
-            await callback.answer(
-                "Gate armed, but no channel set — add one next.", show_alert=True
-            )
+            await callback.answer(t("gate_no_channel", lang), show_alert=True)
         else:
-            await callback.answer("Force join is now " + ("on ✅" if policy.enabled else "off"))
+            await callback.answer(
+                t("force_join_on_toast", lang) if policy.enabled
+                else t("force_join_off_toast", lang)
+            )
     elif action == "cache":
         services.access.forget_membership_cache()
-        await callback.answer("Membership cache cleared 🧹")
+        await callback.answer(t("cache_cleared_toast", lang))
     elif action == "channel":
         await state.set_state(AdminFlow.waiting_channel)
         await callback.message.edit_text(
-            "📢 <b>Send the channel</b>\n\n"
-            "Use <code>@username</code> or a <code>-100…</code> id. The bot must be an "
-            "admin there so it can verify members.",
+            texts.channel_prompt_text(lang=lang),
             parse_mode="HTML",
-            reply_markup=keyboards.channel_set_menu(),
+            reply_markup=keyboards.channel_set_menu(lang=lang),
         )
         await callback.answer()
         return
     elif action == "broadcast":
         await state.set_state(AdminFlow.waiting_broadcast)
         await callback.message.edit_text(
-            texts.broadcast_prompt_text(),
+            texts.broadcast_prompt_text(lang=lang),
             parse_mode="HTML",
-            reply_markup=keyboards.channel_set_menu(),
+            reply_markup=keyboards.channel_set_menu(lang=lang),
         )
         await callback.answer()
         return
@@ -644,30 +752,31 @@ async def on_admin(
         data = await state.get_data()
         await state.clear()
         if action == "abort":
-            await callback.answer("Broadcast aborted")
+            await callback.answer(t("broadcast_aborted_toast", lang))
         else:
             draft = str(data.get("broadcast") or "").strip()
             if not draft:
-                await callback.answer(
-                    "Nothing to send — the draft expired. Try again.", show_alert=True
-                )
+                await callback.answer(t("no_draft_toast", lang), show_alert=True)
             else:
                 asyncio.create_task(_broadcast(services, callback.from_user.id, draft),
                                     name="broadcast")
-                await callback.answer("Broadcast started 📣")
+                await callback.answer(t("broadcast_started_toast", lang))
 
     # "refresh" and unknown actions fall through to a dashboard re-render below.
     policy = services.settings.force_join()
     await callback.message.edit_text(
-        _admin_view(services),
+        _admin_view(services, lang=lang),
         parse_mode="HTML",
-        reply_markup=keyboards.admin_menu(policy, has_channel=bool(policy.channel)),
+        reply_markup=keyboards.admin_menu(
+            policy, has_channel=bool(policy.channel), lang=lang
+        ),
     )
     await callback.answer()
 
 
 @router.message(AdminFlow.waiting_channel, F.text)
 async def on_channel_input(message: Message, services: Services, state: FSMContext) -> None:
+    lang = _lang(services, message.from_user.id)
     if not services.is_admin(message.from_user.id):
         await state.clear()
         return
@@ -676,10 +785,9 @@ async def on_channel_input(message: Message, services: Services, state: FSMConte
     chat = await services.membership.resolve_channel(channel)
     if chat is None:
         await message.answer(
-            "❌ I couldn't read that channel. Make sure the bot is an admin there, then "
-            "send it again.",
+            texts.channel_bad_text(lang=lang),
             parse_mode="HTML",
-            reply_markup=keyboards.channel_set_menu(),
+            reply_markup=keyboards.channel_set_menu(lang=lang),
         )
         return
 
@@ -688,25 +796,26 @@ async def on_channel_input(message: Message, services: Services, state: FSMConte
     services.access.forget_membership_cache()
     await state.clear()
     await message.answer(
-        f"✅ Channel saved: <b>{html.escape(policy.channel)}</b>"
-        + ("" if policy.enabled else "\nForce join is still off — toggle it when ready."),
+        texts.channel_saved_text(policy.channel, lang=lang)
+        + ("" if policy.enabled else texts.channel_saved_off_text(lang=lang)),
         parse_mode="HTML",
-        reply_markup=keyboards.admin_menu(policy, has_channel=True),
+        reply_markup=keyboards.admin_menu(policy, has_channel=True, lang=lang),
     )
 
 
 @router.message(AdminFlow.waiting_broadcast, F.text)
 async def on_broadcast_input(message: Message, services: Services, state: FSMContext) -> None:
     """The admin's draft: validate it, show exactly what users will get."""
+    lang = _lang(services, message.from_user.id)
     if not services.is_admin(message.from_user.id):
         await state.clear()
         return
     text = (message.text or "").strip()
     if not text or len(text) > 4000:
         await message.answer(
-            "⚠️ Broadcast messages must be 1–4000 characters.\nSend the message again.",
+            texts.broadcast_too_long_text(lang=lang),
             parse_mode="HTML",
-            reply_markup=keyboards.channel_set_menu(),
+            reply_markup=keyboards.channel_set_menu(lang=lang),
         )
         return
 
@@ -717,15 +826,15 @@ async def on_broadcast_input(message: Message, services: Services, state: FSMCon
     except TelegramBadRequest as exc:
         await state.clear()
         await message.answer(
-            f"⚠️ That message has invalid HTML:\n{html.escape(str(exc)[:200])}"
+            texts.broadcast_bad_html_text(str(exc)[:200], lang=lang), parse_mode="HTML"
         )
         return
 
     await state.update_data(broadcast=text)
     await message.answer(
-        texts.broadcast_confirm_text(services.users.count()),
+        texts.broadcast_confirm_text(services.users.count(), lang=lang),
         parse_mode="HTML",
-        reply_markup=keyboards.broadcast_confirm_menu(),
+        reply_markup=keyboards.broadcast_confirm_menu(lang=lang),
     )
 
 
@@ -754,9 +863,11 @@ async def _broadcast(services: Services, admin_id: int, text: str) -> None:
 
     logger.info("Broadcast finished: %s sent, %s failed, %s recipient(s)", sent, failed, len(recipients))
     try:
+        # The report goes to the operator in the operator's own language.
         await services.bot.send_message(
             admin_id,
-            texts.broadcast_summary_text(len(recipients), sent, failed),
+            texts.broadcast_summary_text(len(recipients), sent, failed,
+                                         lang=_lang(services, admin_id)),
             parse_mode="HTML",
         )
     except Exception:  # noqa: BLE001 - the report must never crash the task
@@ -766,12 +877,13 @@ async def _broadcast(services: Services, admin_id: int, text: str) -> None:
 # --- join gate --------------------------------------------------------------
 @router.callback_query(JoinCB.filter())
 async def on_join(callback: CallbackQuery, services: Services) -> None:
+    lang = _lang(services, callback.from_user.id)
     if callback.message is None:
         await callback.answer()
         return
     if await services.access.allows(callback.from_user.id):
-        await _show_menu(callback.message, services, None)
-        await callback.answer("Welcome aboard ⚡")
+        await _show_menu(callback.message, services, None, lang=lang)
+        await callback.answer(t("welcome_aboard", lang))
         return
-    await callback.answer("Not yet — join the channel first.", show_alert=True)
-    await _join_wall(callback.message, services)
+    await callback.answer(t("not_yet", lang), show_alert=True)
+    await _join_wall(callback.message, services, lang=lang)
