@@ -80,3 +80,41 @@ def test_stats_count_delivered_bytes(database):
     assert everything["users"] == 1
     assert everything["total"] == 2
     assert everything["bytes"] >= 1024
+
+
+def test_legacy_schema_migration_with_missing_columns(tmp_path):
+    import sqlite3
+    from linktofile.infrastructure.persistence.sqlite import Database
+
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    # Simulate an older v2 schema without updated_at, quality, attempts, error
+    conn.executescript("""
+        CREATE TABLE users (user_id INTEGER PRIMARY KEY);
+        CREATE TABLE downloads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            url TEXT NOT NULL,
+            filename TEXT,
+            size INTEGER,
+            status TEXT DEFAULT 'pending',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO downloads (user_id, url) VALUES (1, 'https://example.com/legacy');
+    """)
+    conn.commit()
+    conn.close()
+
+    # Opening Database triggers _migrate
+    db = Database(db_path)
+    tickets = SqliteTickets(db)
+    item = tickets.get(1)
+    assert item is not None
+    assert item.url == "https://example.com/legacy"
+
+    with db.connect() as check_conn:
+        row = check_conn.execute("SELECT updated_at FROM downloads WHERE id = 1").fetchone()
+        assert row is not None
+        assert row[0] is not None
+
+

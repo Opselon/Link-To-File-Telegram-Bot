@@ -32,6 +32,15 @@ cp .env.example .env        # put BOT_TOKEN + ADMIN_ID in it
 docker compose up -d        # pulls ghcr.io/opselon/link-to-file-telegram-bot:latest
 ```
 
+### Automated Continuous Deployment (CD via GitHub Actions)
+Deploy or migrate to any server automatically via GitHub Actions:
+1. Configure **GitHub Secrets** in your repository settings:
+   - `SERVER_HOST`, `SERVER_USER`, `SERVER_SSH_KEY` (or `SERVER_PASSWORD`), `SERVER_PORT`
+   - `BOT_TOKEN`, `ADMIN_ID`, `YTDLP_PROXY` (optional)
+2. Every release published automatically triggers the **cd** workflow to deploy to your host.
+3. You can also trigger deployment manually anytime from the **Actions** tab (select **cd** ➔ **Run workflow**).
+
+
 ### Bare metal
 
 ```bash
