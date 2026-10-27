@@ -112,7 +112,7 @@ class Database:
         """
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(downloads)")}
         additions = {
-            "updated_at": "DATETIME DEFAULT CURRENT_TIMESTAMP",
+            "updated_at": "DATETIME",
             "quality": "TEXT",
             "attempts": "INTEGER NOT NULL DEFAULT 0",
             "error": "TEXT",
@@ -121,6 +121,8 @@ class Database:
         for name, declaration in additions.items():
             if name not in columns:
                 conn.execute(f"ALTER TABLE downloads ADD COLUMN {name} {declaration}")
+                if name == "updated_at":
+                    conn.execute("UPDATE downloads SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL")
 
         duplicates = conn.execute(
             "SELECT d.id FROM downloads d"

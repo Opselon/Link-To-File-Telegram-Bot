@@ -1,0 +1,76 @@
+name: cd
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (e.g. latest, v3.3.1, or sha-xxxxxxx)"
+        required: false
+        default: "latest"
+  workflow_run:
+    workflows: ["Release"]
+    types:
+      - completed
+    branches:
+      - main
+
+concurrency:
+  group: cd-remote-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy to remote server
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    steps:
+      - name: check secrets configuration
+        id: check_secrets
+        run: |
+          if [ -z "${{ secrets.SERVER_HOST }}" ]; then
+            echo "::notice ::SERVER_HOST is not configured in GitHub Secrets. Skipping automated remote CD."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: deploy via SSH
+        if: steps.check_secrets.outputs.deploy == 'true'
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          INPUT_TAG: ${{ github.event.inputs.image_tag }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          ADMIN_ID: ${{ secrets.ADMIN_ID }}
+          MAX_FILE_SIZE_MB: ${{ secrets.MAX_FILE_SIZE_MB }}
+          DOWNLOAD_TIMEOUT: ${{ secrets.DOWNLOAD_TIMEOUT }}
+          QUEUE_CONCURRENCY: ${{ secrets.QUEUE_CONCURRENCY }}
+          RATE_LIMIT_SECONDS: ${{ secrets.RATE_LIMIT_SECONDS }}
+          LOG_LEVEL: ${{ secrets.LOG_LEVEL }}
+          BOT_DISPLAY_NAME: ${{ secrets.BOT_DISPLAY_NAME }}
+          YTDLP_PROXY: ${{ secrets.YTDLP_PROXY }}
+          INSTANT_PROXY: ${{ secrets.INSTANT_PROXY }}
+          TELEGRAM_API_URL: ${{ secrets.TELEGRAM_API_URL }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          username: ${{ secrets.SERVER_USER || 'root' }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          envs: INPUT_TAG,BOT_TOKEN,ADMIN_ID,MAX_FILE_SIZE_MB,DOWNLOAD_TIMEOUT,QUEUE_CONCURRENCY,RATE_LIMIT_SECONDS,LOG_LEVEL,BOT_DISPLAY_NAME,YTDLP_PROXY,INSTANT_PROXY,TELEGRAM_API_URL
+          script_stop: true
+          script: |
+            set -e
+            export IMAGE_TAG="${INPUT_TAG:-latest}"
+            DEPLOY_DIR="${DEPLOY_DIR:-/root/link-to-file}"
+            mkdir -p "$DEPLOY_DIR"
+
+            if [ -f "/root/ltf/scripts/remote-deploy.sh" ]; then
+              chmod +x "/root/ltf/scripts/remote-deploy.sh"
+              "/root/ltf/scripts/remote-deploy.sh"
+            else
+              curl -fsSL https://raw.githubusercontent.com/Opselon/Link-To-File-Telegram-Bot/main/scripts/remote-deploy.sh -o /tmp/remote-deploy.sh
+              chmod +x /tmp/remote-deploy.sh
+              /tmp/remote-deploy.sh
+            fi
