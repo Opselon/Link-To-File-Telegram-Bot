@@ -1,274 +1,303 @@
-# ⚡ Link → File
+<div align="center">
 
-**Any link in. A file out.** A fast, good-looking Telegram downloader bot — paste a URL and get the file back.
+<img src="docs/assets/banner.png" alt="Link → File Telegram Bot" width="100%">
+
+# ⚡ Link → File Telegram Bot
+
+**Production-grade, asynchronous Telegram media and file downloader bot.**  
+*Paste any URL — YouTube, Instagram, TikTok, X, SoundCloud, or direct file link — and receive your file instantly.*
 
 [![CI](https://github.com/Opselon/Link-To-File-Telegram-Bot/actions/workflows/ci.yml/badge.svg)](https://github.com/Opselon/Link-To-File-Telegram-Bot/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/Opselon/Link-To-File-Telegram-Bot?display_name=tag&sort=semver)](https://github.com/Opselon/Link-To-File-Telegram-Bot/releases/latest)
-[![Container](https://img.shields.io/badge/ghcr.io-link--to--file--telegram--bot-2496ED?logo=docker&logoColor=white)](https://github.com/Opselon/Link-To-File-Telegram-Bot/pkgs/container/link-to-file-telegram-bot)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![CD](https://github.com/Opselon/Link-To-File-Telegram-Bot/actions/workflows/cd.yml/badge.svg)](https://github.com/Opselon/Link-To-File-Telegram-Bot/actions/workflows/cd.yml)
+[![Release](https://img.shields.io/github/v/release/Opselon/Link-To-File-Telegram-Bot?color=38bdf8&style=flat-square&logo=github&label=Release)](https://github.com/Opselon/Link-To-File-Telegram-Bot/releases/latest)
+[![Container](https://img.shields.io/badge/ghcr.io-link--to--file--telegram--bot-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/Opselon/Link-To-File-Telegram-Bot/pkgs/container/link-to-file-telegram-bot)
+[![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![aiogram](https://img.shields.io/badge/aiogram-3.x-2CA5E0?style=flat-square&logo=telegram&logoColor=white)](https://docs.aiogram.dev/)
+[![yt-dlp](https://img.shields.io/badge/engine-yt--dlp-red?style=flat-square&logo=youtube&logoColor=white)](https://github.com/yt-dlp/yt-dlp)
+[![Architecture](https://img.shields.io/badge/Architecture-Clean%20%2F%20DDD-8A2BE2?style=flat-square)](docs/ARCHITECTURE.md)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
+
+[Features](#-key-features) • [Architecture](#-architecture--data-flow) • [Deployment](#-deployment--quickstart) • [Configuration](#-configuration) • [Admin Suite](#-admin-suite) • [Persian Guide (فارسی)](#-راهنمای-فارسی)
+
+</div>
 
 ---
 
-## Install
+## 🚀 Key Features
 
-### One line (recommended)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Opselon/Link-To-File-Telegram-Bot/main/install.sh | bash
-```
-
-The installer detects Docker (preferred) or Python 3.10+, asks for your bot token, writes a `0600` `.env`, and starts the bot. Fully unattended:
-
-```bash
-BOT_TOKEN=123456:ABC… ADMIN_ID=123456789 \
-  curl -fsSL https://raw.githubusercontent.com/Opselon/Link-To-File-Telegram-Bot/main/install.sh | bash
-```
-
-### Docker Compose
-
-```bash
-git clone https://github.com/Opselon/Link-To-File-Telegram-Bot && cd Link-To-File-Telegram-Bot
-cp .env.example .env        # put BOT_TOKEN + ADMIN_ID in it
-docker compose up -d        # pulls ghcr.io/opselon/link-to-file-telegram-bot:latest
-```
-
-### Automated Continuous Deployment (CD via GitHub Actions)
-Deploy or migrate to any server automatically via GitHub Actions:
-1. Configure **GitHub Secrets** in your repository settings:
-   - `SERVER_HOST`, `SERVER_USER`, `SERVER_SSH_KEY` (or `SERVER_PASSWORD`), `SERVER_PORT`
-   - `BOT_TOKEN`, `ADMIN_ID`, `YTDLP_PROXY` (optional)
-2. Every release published automatically triggers the **cd** workflow to deploy to your host.
-3. You can also trigger deployment manually anytime from the **Actions** tab (select **cd** ➔ **Run workflow**).
-
-
-### Bare metal
-
-```bash
-git clone https://github.com/Opselon/Link-To-File-Telegram-Bot && cd Link-To-File-Telegram-Bot
-python3 -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt
-python main.py --setup      # interactive wizard → .env
-python main.py              # or: python main.py --check (token/ffmpeg/storage)
-```
-
-Docker: [get.docker.com](https://get.docker.com) · ffmpeg: `sudo apt install ffmpeg` (needed for YouTube/Instagram merging).
+* ⚡ **Instant Lane (Zero-Wait Downloads):** High-traffic media platforms (Instagram Reels/Posts, TikTok, X/Twitter) bypass heavy metadata extraction and probe calls, routing directly to instant streaming download.
+* 🎬 **Universal Provider Engine:** Powered by `yt-dlp` with support for 1,000+ streaming sites (YouTube, Instagram, TikTok, Twitter/X, SoundCloud, Reddit, Vimeo, Facebook, Pinterest, Rumble, Bilibili) alongside direct HTTP/HTTPS files.
+* 🎚 **Adaptive Quality Picker:** Interactive inline keyboard offering video formats from 4K/1080p down to 144p, and audio extraction in MP3 (320kbps, 192kbps, 128kbps). Remembers your preferred quality per chat.
+* 🖼 **Smart Media Previews:** Non-blocking metadata probe displays rich cards with title, uploader, duration, and thumbnail before download execution with strict sub-second deadline fallback.
+* 🔄 **Durable SQLite Queue & Crash Recovery:** Jobs are durably committed to SQLite (`status = 'queued'`) *before* entering in-memory worker queues. Process restarts or host crashes automatically resume incomplete transfers without losing user requests.
+* 🛡 **Fail-Closed Security & SSRF Protection:** Multi-stage SSRF validator blocks LAN IPs, private CIDR blocks, IPv4-mapped IPv6 ranges, cloud metadata endpoints (`169.254.169.254`), and loops across all redirect hops.
+* 📊 **Real-Time Live Cards:** Thread-safe dynamic progress cards updating percentage, transfer speed, and ETA with a responsive single-tap cancel button (`asyncio.Task` interruption).
+* 🔒 **Channel Force-Join Gate:** Dynamic channel membership enforcement configurable directly from Telegram (`/admin`), featuring 60-second caching and graceful fail-open resilience during Telegram outages.
+* 📢 **Admin Broadcasting & Observability:** Live fan-out broadcast engine with flood-wait backoff, blocked-user filtering, and structured logging (`[PIPELINE:<stage>]`) for instant diagnosis.
+* 🚀 **Turnkey Continuous Deployment:** GitHub Actions pipeline deploys multi-arch Docker images to GHCR and automatically updates production servers over SSH with zero downtime.
 
 ---
 
-## What it does
+## 🏛 Architecture & Data Flow
 
-| | |
-|---|---|
-| 🎬 **Media sites** | YouTube, Instagram, TikTok, X, Facebook, Vimeo, Reddit, SoundCloud, Twitch, Pinterest, Dailymotion, Bilibili, VK, Rumble… and anything else `yt-dlp` knows |
-| 📄 **Direct files** | Any public http(s) link — zip, pdf, images, signed CDN URLs |
-| 🎚 **Quality picker** | 4K → 144p, plus MP3 at 320/192/128 kbps |
-| 📊 **Live card** | Real-time progress bar, speed, ETA, one-tap cancel |
-| 🔁 **Recovery** | Retry / change quality / download again right on the result card |
-| 🛡 **Safety** | SSRF guard, per-user rate limit, hard size caps, temporary files deleted after upload |
+Link → File is engineered strictly following **Clean Architecture**, **Domain-Driven Design (DDD)**, and **SOLID** principles. Dependencies point inward: the domain core has zero external framework dependencies.
 
-### What's new in v3.1 — smart preview & history
+```mermaid
+flowchart TD
+    User([Telegram User]) <-->|Message / Callback| TG[aiogram 3 Telegram Interface]
+    
+    subgraph Infrastructure Layer
+        TG
+        SQL[(SQLite WAL Storage)]
+        DL[Streaming Engine / yt-dlp]
+        SSRF[SSRF & DNS Guard]
+        MEM[Channel Membership Port]
+    end
 
-- **Smart media preview.** Send a YouTube/Instagram/TikTok link and the bot now shows the title, uploader, duration and thumbnail in a photo card *before* the quality picker — one `extract_info` pass, cached per URL, with a hard deadline (`PREVIEW_TIMEOUT`, 0 disables it). The picker only waits `PREVIEW_WAIT` seconds for it: a slow site gets the plain picker immediately while the probe finishes in the background and fills the cache, so nothing ever gets slower.
-- **Remembered quality.** The quality you pick is stored per user; next time you send a media link the picker opens with **⚡ My usual · 720p** on top. One tap to use it, **↺ Reset** to forget.
-- **Download history.** `/history` (and a **🕘 History** button on the main menu) lists your last 8 downloads with status and size; tap any row to fetch it again.
-- **Admin broadcast.** `/admin` → **📣 Broadcast** → send a message → see exactly what users will get → confirm. The fan-out respects flood control, skips blocked/deleted chats, and reports back with a delivered/failed summary.
-- **Crash recovery.** The queue lives in memory, so a restart used to strand tickets in *downloading* forever. Startup now marks every non-terminal ticket as failed, so stats and history stay honest.
-- **Admin flow isolation fix.** A link sent while the admin channel/broadcast flow was open used to be swallowed by the menu handler. The plain-text handler is now state-filtered, so an open admin form never eats a link (or vice versa).
+    subgraph Application Layer
+        WF[DownloadWorkflow]
+        QUEUE[Durable Queue & Recovery]
+        PREV[Smart Preview Service]
+        SETT[Settings & ForceJoin Guard]
+    end
 
-### What's new in v3 — clean architecture
+    subgraph Domain Layer
+        CORE[DownloadTicket & Quality Models]
+        POL[Delivery & Format Policies]
+        ERR[BotError Hierarchy]
+    end
 
-v3 is a full rewrite of the internals with the same UX, plus the features below.
-
-- **Layered codebase (Clean Architecture + DDD + SOLID).** `domain/` holds pure rules (models, policies, ports, errors) with no Telegram or SQLite imports; `application/` holds use cases that only talk to ports; `infrastructure/` implements those ports (SQLite, yt-dlp engine, aiogram surface); `bootstrap.py` is the single composition root. Every dependency points inward.
-- **Real state machine.** Typed FSM states, typed callback payloads (`QualityCB`, `TicketCB`, `Nav`, `AdminCB`) and a ticket lifecycle that refuses illegal transitions.
-- **Buttons with a way back on every screen.** Same native `primary` / `success` / `danger` styling, now with `⬅️ Back` / `🏠 Menu` / `✖️ Close` everywhere.
-- **Force-join gate with an admin dashboard.** `/admin` → toggle the gate, set the channel, clear the membership cache. Membership checks are cached for 60 s; an API outage fails open instead of locking everyone out.
-- **Instant cancel — for real.** Each job runs in its own `asyncio.Task`, so cancelling interrupts a hung socket instead of waiting for the next chunk. Queued jobs are skipped, not executed.
-- **Smaller surface, fewer footguns.** One workflow class owns guard → download → upload → delete, and files are deleted in `finally` no matter how the job ends.
-
----
-
-## Commands
-
-| Command | What it does |
-|---|---|
-| `/start` | Main menu |
-| `/help` | How it works |
-| `/history` | Your recent downloads (replay in one tap) |
-| `/stats` | Your download stats |
-| `/cancel` | Stop your running downloads |
-| `/id` | Your Telegram ID / chat ID |
-| `/version` | Bot version + latest release link |
-
-Admins (`ADMIN_ID`) get **🛠 Admin dashboard** (`/admin`): users, downloads today, queue load, disk space, plus the force-join controls and **📣 Broadcast**.
-
-### Force join
-
-`/admin` → **📢 Channel** → send `@yourchannel` (the bot must be an admin there) → toggle **🔒 Force join: ON**.
-
-From then on, links and quality picks are refused until the user joins; the bot shows a **Join channel** button and an **I joined** check. Everything is stored in SQLite, so it survives restarts and updates — no env change needed.
-
-### Broadcast
-
-`/admin` → **📣 Broadcast** → send the message (HTML allowed). The bot echoes it back as a preview, shows the recipient count, and only sends after **📣 Send to everyone**. The fan-out runs in the background at ~20 messages/s, retries on flood control, skips users who blocked the bot, and finishes with a delivered/failed summary.
-
----
-
-## Configuration
-
-All settings are environment variables (`.env` is read automatically). Only the first two are required.
-
-| Variable | Default | Notes |
-|---|---|---|
-| `BOT_TOKEN` | — | From [@BotFather](https://t.me/BotFather) |
-| `ADMIN_ID` | — | Your numeric Telegram ID |
-| `MAX_FILE_SIZE_MB` | `2000` | Clamped to 1–2000 (Bot API maximum) |
-| `DOWNLOAD_TIMEOUT` | `600` | Per-request timeout, seconds |
-| `QUEUE_CONCURRENCY` | `3` | Parallel downloads (1–16) |
-| `QUEUE_MAX_SIZE` | `200` | Waiting jobs before the bot says "busy" |
-| `RATE_LIMIT_SECONDS` | `3` | Per-user cooldown |
-| `PREVIEW_TIMEOUT` | `12` | Seconds a media page may take to describe itself; `0` disables the preview card |
-| `PREVIEW_WAIT` | `5` | Seconds the quality picker waits for that preview before showing up without it |
-| `DOWNLOAD_CHUNK_KB` | `256` | Streaming chunk size |
-| `UPLOAD_CHUNK_KB` | `1024` | Upload chunk size |
-| `YTDLP_FRAGMENTS` | `8` | Concurrent media fragments |
-| `PROGRESS_INTERVAL_MS` | `1500` | Progress card refresh |
-| `TELEGRAM_API_URL` | — | Self-hosted Bot API server |
-| `PROXY_URL` | — | Egress proxy for all traffic, e.g. `socks5://127.0.0.1:9050` |
-| `YTDLP_PROXY` | `PROXY_URL` | Media-only proxy (keeps direct downloads direct) |
-| `YTDLP_COOKIES_FILE` | — | Netscape `cookies.txt` for bot-checked sites |
-| `BOT_DISPLAY_NAME` | — | Optional BotFather display name |
-| `MIN_FREE_DISK_MB` | `512` | Refuse new jobs below this free space |
-| `TEMP_FILE_TTL` | `900` | Seconds before orphaned temp files are swept |
-| `MAX_PENDING_PER_USER` | `2` | Per-user queue depth |
-| `DOWNLOAD_RETRIES` | `3` | Attempts per job on transient failures (1–10) |
-| `RETRY_BACKOFF_SECONDS` | `2` | First retry delay; doubles per attempt |
-| `RETRY_BACKOFF_MAX` | `30` | Ceiling for that backoff |
-| `STALL_TIMEOUT` | `120` | Seconds of silence before a transfer counts as stalled |
-| `FLOOD_WAIT_MAX` | `60` | Longest Telegram flood wait the bot absorbs before failing cleanly |
-| `RESUME_ON_STARTUP` | `1` | Replay jobs committed to the durable queue by the previous process |
-| `RESUME_MAX_JOBS` | `50` | Cap on jobs resumed in one boot (the rest stay queued) |
-| `SSRF_ENFORCE` | `1` | Fail-closed URL policy; `0` only for trusted networks |
-| `SSRF_DNS_CHECK` | `1` | Also reject hostnames that resolve to private addresses |
-| `SSRF_MAX_REDIRECTS` | `5` | Redirect hops allowed; each is re-validated |
-| `MAX_TEMP_MB` | `4096` | Temp-dir budget before new jobs are refused |
-| `YTDLP_THREADS` | `QUEUE_CONCURRENCY` | Size of the yt-dlp worker pool (1–32) |
-| `DATA_DIR` | project dir | Database, logs, temp files (`/data` in Docker) |
-| `LOG_LEVEL` | `INFO` | `DEBUG` for troubleshooting |
-
-### Durability and recovery
-
-The downloads table *is* the queue. Every accepted job is written to SQLite
-(`status = 'queued'` plus its chosen quality) **before** it enters the in-memory
-asyncio queue, so a crash or a `docker restart` cannot lose an accepted link:
-
-- on boot, `queued` rows are replayed through the normal workflow and delivered
-  as a fresh chat message;
-- rows that were `downloading`/`uploading` are failed as `interrupted` — their
-  temp file is gone, so pretending they still run would be a lie;
-- tickets still waiting for a quality choice are failed as `abandoned`;
-- a partial unique index (`user_id, url WHERE status IN ('queued','downloading','uploading')`)
-  makes a double-tapped link a no-op instead of two downloads;
-- `/admin` → **Queue** shows live jobs with their age, **Errors** shows recent
-  failures with their machine-readable kind.
-
-Transient failures (DNS, resets, 408/425/429/5xx, stalls) are retried with
-capped exponential backoff; private/DRM/404/oversized answers fail immediately so
-the retry budget is not wasted. `STALL_TIMEOUT` catches a connection that stops
-sending without closing, and `FLOOD_WAIT_MAX` bounds Telegram's rate-limit waits.
-
-### Blocked sites (YouTube bot check, geo-blocks)
-
-Datacenter IPs often get *"Sign in to confirm you're not a bot"* from YouTube. Two supported fixes:
-
-```env
-# 1) route everything through a proxy (SOCKS5 or HTTP)
-PROXY_URL=socks5://127.0.0.1:9050
-
-# 2) or supply browser cookies for the extractor
-YTDLP_COOKIES_FILE=/data/cookies.txt
+    TG -->|Command / URL| SETT
+    SETT -->|Validate Access| MEM
+    SETT -->|Valid Request| PREV
+    PREV -->|Probe Metadata| DL
+    TG -->|Quality Choice / Instant| QUEUE
+    QUEUE -->|Persist Job| SQL
+    QUEUE -->|Worker Dispatch| WF
+    WF -->|URL Sanity Check| SSRF
+    WF -->|Stream Media| DL
+    WF -->|Live Progress / Deliver| TG
+    WF -->|State Transitions| SQL
 ```
 
-Both are optional; without them everything else keeps working.
-
-### Files larger than 50 MB
-
-The cloud Bot API caps bot uploads at **50 MB**. To send up to 2 GB, run a [local Bot API server](https://github.com/tdlib/telegram-bot-api) and point `TELEGRAM_API_URL` at it (e.g. `http://127.0.0.1:8081`). The bot detects the higher limit and reports it in `/start`.
-
----
-
-## Releases
-
-Releases are automated. Bumping `linktofile/infrastructure/system/version.py` on `main` (or pushing a `v*` tag) makes the **Release** workflow:
-
-1. run the test suite,
-2. create the git tag,
-3. build and push a multi-arch image (`linux/amd64`, `linux/arm64`) to `ghcr.io/opselon/link-to-file-telegram-bot` with `latest`, `major.minor`, `version` and `sha` tags,
-4. publish a GitHub release with generated notes, source `.zip`/`.tar.gz` and `SHA256SUMS.txt`.
-
-```bash
-docker pull ghcr.io/opselon/link-to-file-telegram-bot:latest
-```
-
----
-
-## Development
-
-```bash
-pip install -r requirements-dev.txt
-ruff check --select E9,F .
-PYTHONPATH=. pytest -q
-python main.py --check     # token, ffmpeg, storage
-```
+### Module Boundary Map
 
 ```
 linktofile/
-├── domain/                 pure rules — no I/O
-│   ├── models.py           DownloadTicket, Quality, MediaAsset, ForceJoinPolicy
-│   ├── policies.py         delivery cap + yt-dlp format policy
-│   ├── ports.py            Protocols the outside world must satisfy
-│   └── errors.py           BotError hierarchy
-├── application/            use cases
-│   ├── downloads.py        guard → fetch → deliver → clean up
-│   ├── queue.py            bounded queue, N workers, instant cancel
-│   ├── settings.py         force-join settings + access gate
-│   └── active.py           live ticket registry
-├── infrastructure/
-│   ├── persistence/        SQLite adapters (WAL)
-│   ├── download/           streaming engine + yt-dlp adapter
-│   ├── telegram/           handlers, keyboards, texts, delivery, callbacks
-│   ├── membership.py       channel membership checks (cached)
-│   ├── janitor.py          orphan sweep
-│   └── system/             version + self-update
-├── cli/wizard.py           setup wizard
-├── shared/utils.py         URL/SSRF/formatting helpers
-└── bootstrap.py            composition root (the only place things are wired)
-main.py                     CLI + polling loop
-scripts/healthcheck.py      container health probe
+├── domain/                     # Pure domain rules — zero external dependencies
+│   ├── models.py               # DownloadTicket, Quality, MediaAsset, ForceJoinPolicy
+│   ├── policies.py             # File size limits, timeout guards, format rules
+│   ├── ports.py                # Protocols and interfaces for persistence and delivery
+│   └── errors.py               # Explicit BotError domain exception hierarchy
+├── application/                # Orchestration & use cases
+│   ├── downloads.py            # Guard -> Fetch -> Deliver -> Teardown workflow
+│   ├── queue.py                # Bounded queue runner with concurrent async workers
+│   ├── recovery.py             # Startup durable queue replay & state reconciliation
+│   ├── settings.py             # Force-join policies and admin configuration
+│   └── active.py               # In-flight ticket registry & cancellation handles
+├── infrastructure/             # Concrete implementations
+│   ├── persistence/sqlite.py   # High-concurrency SQLite storage with WAL mode
+│   ├── download/               # Resilient streaming HTTP engine & yt-dlp adapter
+│   ├── telegram/               # aiogram handlers, keyboards, cards, and delivery
+│   ├── membership.py           # Cached Telegram channel membership validator
+│   ├── janitor.py              # Automated background cleanup of orphaned temp files
+│   └── system/                 # SemVer versioning and metrics
+├── bootstrap.py                # Single composition root (wires infrastructure to use cases)
+└── main.py                     # CLI entrypoint, polling loop, and health probes
 ```
-
-Pull requests are welcome — keep `ruff check --select E9,F .` and `pytest` green.
 
 ---
 
-## فارسی — راه‌اندازی سریع
+## 📦 Supported Providers
+
+| Category | Platform | Supported Features |
+|---|---|---|
+| **Short Videos & Reels** | Instagram Reels / Stories / Posts | Instant Lane, High-Speed Direct Egress |
+| **Short Videos** | TikTok (with/without watermark) | Instant Lane, Audio & Video extraction |
+| **Social Video** | X (formerly Twitter) | Instant Lane, Multiple resolution selection |
+| **Video Sharing** | YouTube (Videos, Shorts, Playlists) | 4K, 144p, MP3 audio (320k), Subtitles |
+| **Music & Audio** | SoundCloud, Bandcamp | High-bitrate audio, Metadata & Artwork tags |
+| **Discussions** | Reddit, Vimeo, Facebook | Merged video & audio streams |
+| **Direct Links** | Any public HTTP / HTTPS URL | Resumable streaming, MIME detection |
+
+---
+
+## 🛠 Deployment & Quickstart
+
+### Method 1: Turnkey One-Line Installer (Recommended)
+
+Run on any Ubuntu/Debian server. The script auto-detects Docker, writes `.env` with strict `0600` permissions, and launches the container:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Opselon/Link-To-File-Telegram-Bot/main/install.sh | bash
 ```
 
-۱. از [@BotFather](https://t.me/BotFather) یک ربات بسازید و توکن را بگیرید.
-۲. اسکریپت را اجرا کنید و توکن را وارد کنید (یا `BOT_TOKEN=...` را قبل از اجرا ست کنید).
-۳. آیدی عددی خودتان را از [@userinfobot](https://t.me/userinfobot) بگیرید و به‌عنوان `ADMIN_ID` وارد کنید.
-۴. تمام؛ لینک را برای ربات بفرستید تا فایل را دریافت کنید.
+For non-interactive unattended installation:
 
-- نصب با داکر: `docker compose up -d`
-- اجرا بدون داکر: `python main.py --setup` و سپس `python main.py`
-- برای فایل‌های بالای ۵۰ مگابایت به یک سرور محلی Bot API نیاز دارید (`TELEGRAM_API_URL`).
-- **جوین اجباری کانال:** پنل ادمین `/admin` → 📢 Channel → آیدی کانال را بفرستید → 🔒 Force join: ON. از آن پس کاربران باید عضو شوند تا ربات برایشان کار کند (مدل ۳ با معماری تمیز، دکمهٔ برگشت روی همهٔ صفحات و cancel بی‌درنگ).
+```bash
+BOT_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" ADMIN_ID="5094837833" \
+  curl -fsSL https://raw.githubusercontent.com/Opselon/Link-To-File-Telegram-Bot/main/install.sh | bash
+```
 
 ---
 
-## License
+### Method 2: Docker Compose (GHCR Image)
 
-MIT — see [LICENSE](LICENSE).
+1. Clone repository and set up environment:
+
+```bash
+git clone https://github.com/Opselon/Link-To-File-Telegram-Bot.git
+cd Link-To-File-Telegram-Bot
+cp .env.example .env
+```
+
+2. Edit `.env` with your credentials:
+
+```ini
+BOT_TOKEN=123456789:AAExampleTokenFromBotFather
+ADMIN_ID=5094837833
+```
+
+3. Launch the stack:
+
+```bash
+docker compose up -d
+```
+
+The container automatically pulls the multi-architecture image from GitHub Container Registry:
+`ghcr.io/opselon/link-to-file-telegram-bot:latest`
+
+---
+
+### Method 3: Automated Continuous Deployment (CD via GitHub Actions)
+
+Deploy or migrate to any remote Linux server automatically upon every release or commit to `main`:
+
+1. Configure **GitHub Secrets** in your repository settings (**Settings ➔ Secrets and variables ➔ Actions**):
+   * `SERVER_HOST`: Remote server IP address (e.g. `80.47.236.99`)
+   * `SERVER_PORT`: SSH port (default `22`)
+   * `SERVER_USER`: SSH username (e.g. `root`)
+   * `SERVER_SSH_KEY` / `SSH_PRIVATE_KEY`: Ed25519/RSA private key authorized on the server
+   * `BOT_TOKEN`: Telegram bot token
+   * `ADMIN_ID`: Numeric Telegram ID of the administrator
+   * `YTDLP_PROXY`: (Optional) SOCKS5 or HTTP proxy URL
+2. Every release publication or CI pass on `main` automatically invokes `.github/workflows/cd.yml` to pull the latest GHCR image and perform zero-downtime deployment.
+3. You can also trigger deployment manually anytime via **Actions ➔ CD ➔ Run workflow**.
+
+---
+
+### Method 4: Bare Metal (Python Virtualenv)
+
+Requirements: Python 3.10+, `ffmpeg`, SQLite 3.
+
+```bash
+git clone https://github.com/Opselon/Link-To-File-Telegram-Bot.git
+cd Link-To-File-Telegram-Bot
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Run the interactive configuration wizard
+python main.py --setup
+
+# Verify token, ffmpeg, and storage connectivity
+python main.py --check
+
+# Start polling
+python main.py
+```
+
+---
+
+## ⚙ Configuration
+
+All configuration is managed through environment variables (`.env` is automatically parsed).
+
+| Variable | Default | Purpose & Constraints |
+|---|---|---|
+| `BOT_TOKEN` | *Required* | Telegram Bot API token from [@BotFather](https://t.me/BotFather) |
+| `ADMIN_ID` | *Required* | Numeric Telegram ID of bot superadmin |
+| `MAX_FILE_SIZE_MB` | `2000` | Hard cap on downloaded file size (1–2000 MB) |
+| `QUEUE_CONCURRENCY` | `3` | Parallel download worker tasks (1–16) |
+| `QUEUE_MAX_SIZE` | `200` | Maximum queue depth before signaling user busy |
+| `RATE_LIMIT_SECONDS` | `3` | Per-user cooldown between consecutive requests |
+| `PREVIEW_TIMEOUT` | `12` | Max seconds allowed for metadata probe (`0` disables preview) |
+| `PREVIEW_WAIT` | `5` | Quality picker deadline before falling back to immediate UI |
+| `RESUME_ON_STARTUP` | `1` | Replay uncompleted durable queue jobs after restarts |
+| `DOWNLOAD_RETRIES` | `3` | Capped retry attempts for transient network faults |
+| `RETRY_BACKOFF_SECONDS` | `2` | Initial retry backoff delay (exponential) |
+| `STALL_TIMEOUT` | `120` | Seconds of silence before marking stalled connections |
+| `FLOOD_WAIT_MAX` | `60` | Maximum Telegram flood wait delay absorbed by bot |
+| `SSRF_ENFORCE` | `1` | Enforce fail-closed URL validation (`0` disables guard) |
+| `SSRF_DNS_CHECK` | `1` | Resolve domains to ensure no private/loopback IPs |
+| `YTDLP_PROXY` | — | Dedicated egress proxy for media scraping (e.g. `socks5://127.0.0.1:9050`) |
+| `INSTANT_PROXY` | Direct | Dedicated proxy override for instant-lane platforms |
+| `YTDLP_COOKIES_FILE` | — | Path to Netscape `cookies.txt` for bot-protected extractors |
+| `TELEGRAM_API_URL` | Cloud API | Custom local Telegram Bot API endpoint for 2GB+ files |
+| `DATA_DIR` | `./data` | Persistent path for SQLite DB, logs, and temp downloads |
+
+---
+
+## 🛠 Admin Suite
+
+Send `/admin` to access the responsive administrator control plane:
+
+* 📊 **Live System Metrics:** Real-time metrics including active memory usage (RSS), storage utilization, database row count, and queue load.
+* 📢 **Channel Force-Join:** Enforce channel membership (`@channel_username`) before users can download media. Features instant caching and bypass protection.
+* 📣 **Mass Broadcast Engine:** Distribute announcements to all users with live delivery progress, automatic flood-control handling, and detailed delivery summaries.
+* 📋 **Live Queue Observer:** Inspect active jobs, elapsed time, current retry counts, and machine-readable error reasons.
+
+---
+
+## 🔬 Development & Quality Gates
+
+Every pull request and release is validated against strict automated quality gates:
+
+```bash
+# 1. Install development dependencies
+pip install -r requirements-dev.txt
+
+# 2. Fast linting and syntax checking
+ruff check --select E9,F .
+
+# 3. Bytecode validation
+python -m compileall -q .
+
+# 4. Run the full pytest test suite
+PYTHONPATH=. pytest -q
+
+# 5. Build and verify multi-arch Docker image
+docker build -t link-to-file:test .
+docker run --rm link-to-file:test python main.py --version
+```
+
+---
+
+## 🇮🇷 راهنمای فارسی
+
+### راه‌اندازی سریع با یک دستور
+
+برای نصب خودکار و اجرای ربات روی سرور لینوکس:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Opselon/Link-To-File-Telegram-Bot/main/install.sh | bash
+```
+
+### مراحل راه‌اندازی:
+۱. از طریق [@BotFather](https://t.me/BotFather) ربات تلگرام خود را ساخته و توکن آن را یادداشت کنید.  
+۲. شناسه عددی خود را از طریق [@userinfobot](https://t.me/userinfobot) دریافت کنید (`ADMIN_ID`).  
+۳. اسکریپت نصب را اجرا نموده و مقادیر را وارد کنید تا کانتینر داکر به صورت خودکار بیلد و اجرا شود.  
+۴. برای مدیریت ربات، دستور `/admin` را ارسال نمایید.
+
+**قابلیت‌های نسخه ۳:**
+* **Instant Lane:** دانلود فوق‌سریع ریلز و پست‌های اینستاگرام، تیک‌تاک و توییتر/X بدون معطلی و انتخاب دستی کیفیت.
+* **Smart Preview:** نمایش پیش‌نمایش ویدیو شامل کاور، عنوان و مدت‌زمان قبل از دانلود.
+* **صف ذخیره‌شده پایدار (Durable Queue):** ذخیره درخواست‌ها در دیتابیس SQLite جهت ادامه خودکار فرآیند دانلود حتی پس از ریستارت سرور.
+* **جوین اجباری:** امکان قفل کردن ربات روی کانال تلگرام با دکمه‌های شیشه‌ای تایید عضویت از طریق پنل `/admin`.
+
+---
+
+## 📄 License
+
+This project is licensed under the terms of the [MIT License](LICENSE).  
+Maintained by [Opselon](https://github.com/Opselon).
